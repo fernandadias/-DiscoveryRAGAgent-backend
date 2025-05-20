@@ -4,7 +4,6 @@ import weaviate
 from weaviate.auth import AuthApiKey
 from src.context.objectives_manager import ObjectivesManager
 from src.context.guidelines_manager import GuidelinesManager
-from openai import OpenAI
 import json
 import logging
 
@@ -35,13 +34,25 @@ class RAGIntegration:
             auth_client_secret=auth_config
         )
         
-        # Configurar cliente OpenAI (nova API v1.0.0+)
-        openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        self.openai_client = OpenAI(api_key=openai_api_key)
-        
         # Inicializar gerenciadores de contexto
         self.objectives_manager = ObjectivesManager()
         self.guidelines_manager = GuidelinesManager()
+        
+        # Inicializar OpenAI Client mais tarde, apenas quando necessário
+        self.openai_client = None
+    
+    def _init_openai_client(self):
+        """Inicializa o cliente OpenAI apenas quando necessário"""
+        if self.openai_client is None:
+            try:
+                # Importar OpenAI apenas quando necessário
+                from openai import OpenAI
+                openai_api_key = os.getenv("OPENAI_API_KEY", "")
+                self.openai_client = OpenAI(api_key=openai_api_key)
+                logger.info("Cliente OpenAI inicializado com sucesso")
+            except Exception as e:
+                logger.error(f"Erro ao inicializar cliente OpenAI: {str(e)}")
+                raise
     
     def process_query(self, query: str, objective_id: str = None) -> Dict[str, Any]:
         """
@@ -141,6 +152,9 @@ Inclua citações diretas das fontes quando relevante, indicando de qual documen
     def _generate_response(self, prompt: str) -> str:
         """Gera resposta usando a LLM (OpenAI GPT-4o) com a nova API v1.0.0+"""
         try:
+            # Inicializar o cliente OpenAI apenas quando necessário
+            self._init_openai_client()
+            
             # Chamada à API da OpenAI usando a nova interface do cliente v1.0.0+
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
