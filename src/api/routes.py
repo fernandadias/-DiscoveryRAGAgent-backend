@@ -1,8 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Query
+from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Query, Header, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Optional
 import uuid
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+import jwt
+from jwt.exceptions import PyJWTError
 
 from src.api.models import (
     QueryRequest, 
@@ -13,7 +16,9 @@ from src.api.models import (
     DocumentListItem,
     ObjectiveListItem,
     SourceModel,
-    APIResponse
+    APIResponse,
+    LoginRequest,
+    TokenResponse
 )
 
 from src.rag.rag_integration import RAGIntegration
@@ -23,6 +28,17 @@ router = APIRouter()
 rag_integration = RAGIntegration()
 objectives_manager = ObjectivesManager()
 
+# Configuração de segurança
+security = HTTPBearer()
+SECRET_KEY = "discovery_rag_agent_secret_key"  # Em produção, usar variável de ambiente
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 horas
+
+# Credenciais hardcoded
+VALID_CREDENTIALS = {
+    "Mario": "Bros"
+}
+
 # Simulação de banco de dados em memória para desenvolvimento
 conversations_db = {}
 documents_db = {}
@@ -31,8 +47,56 @@ def generate_uuid():
     """Gera um UUID único para identificadores"""
     return str(uuid.uuid4())
 
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    """Cria um token JWT de acesso"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+    """Verifica o token JWT e retorna o usuário atual"""
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Credenciais inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except PyJWTError:
+        raise credentials_exception
+    return username
+
+@router.post("/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """
+    Endpoint de login com credenciais hardcoded
+    """
+    # Verificar se as credenciais são válidas
+    if request.username not in VALID_CREDENTIALS or VALID_CREDENTIALS[request.username] != request.password:
+        raise HTTPException(
+            status_code=401,
+            detail="Nome de usuário ou senha incorretos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Criar token de acesso
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": request.username}, expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @router.get("/objectives", response_model=List[ObjectiveListItem])
-async def get_objectives():
+async def get_objectives(current_user: str = Depends(get_current_user)):
     """
     Retorna a lista de todos os objetivos disponíveis
     """
@@ -43,7 +107,7 @@ async def get_objectives():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/objectives/default", response_model=str)
-async def get_default_objective():
+async def get_default_objective(current_user: str = Depends(get_current_user)):
     """
     Retorna o ID do objetivo padrão (Sobre a discovery)
     """
@@ -54,7 +118,7 @@ async def get_default_objective():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/chat", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
+async def process_query(request: QueryRequest, current_user: str = Depends(get_current_user)):
     """
     Processa uma consulta do usuário e retorna a resposta do agente IA
     """
@@ -113,7 +177,7 @@ async def process_query(request: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/conversations", response_model=List[ConversationListItem])
-async def get_conversations():
+async def get_conversations(current_user: str = Depends(get_current_user)):
     """
     Retorna a lista de todas as conversas salvas
     """
@@ -132,7 +196,7 @@ async def get_conversations():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
-async def get_conversation(conversation_id: str):
+async def get_conversation(conversation_id: str, current_user: str = Depends(get_current_user)):
     """
     Retorna os detalhes de uma conversa específica
     """
@@ -151,7 +215,7 @@ async def get_conversation(conversation_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/conversations", response_model=APIResponse)
-async def save_conversation(conversation: ConversationRequest):
+async def save_conversation(conversation: ConversationRequest, current_user: str = Depends(get_current_user)):
     """
     Salva uma nova conversa ou atualiza uma existente
     """
@@ -175,7 +239,7 @@ async def save_conversation(conversation: ConversationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/upload", response_model=APIResponse)
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     """
     Faz upload de um novo documento para a base de conhecimento
     """
@@ -211,7 +275,7 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/documents", response_model=List[DocumentListItem])
-async def get_documents():
+async def get_documents(current_user: str = Depends(get_current_user)):
     """
     Retorna a lista de documentos na base de conhecimento
     """
@@ -230,7 +294,7 @@ async def get_documents():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/documents/{document_id}", response_model=APIResponse)
-async def delete_document(document_id: str):
+async def delete_document(document_id: str, current_user: str = Depends(get_current_user)):
     """
     Remove um documento da base de conhecimento
     """
@@ -254,7 +318,7 @@ async def delete_document(document_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/reindex", response_model=APIResponse)
-async def reindex_documents():
+async def reindex_documents(current_user: str = Depends(get_current_user)):
     """
     Trigger manual para reindexar todos os documentos
     """

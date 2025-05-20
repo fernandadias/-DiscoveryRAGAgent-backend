@@ -2,6 +2,14 @@ from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 from datetime import datetime
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+
 class QueryRequest(BaseModel):
     query: str
     conversation_id: Optional[str] = None

@@ -4,8 +4,16 @@ import weaviate
 from weaviate.auth import AuthApiKey
 from src.context.objectives_manager import ObjectivesManager
 from src.context.guidelines_manager import GuidelinesManager
-import openai
+from openai import OpenAI
 import json
+import logging
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class RAGIntegration:
     def __init__(self):
@@ -20,15 +28,16 @@ class RAGIntegration:
         # Criar conexão usando a API v3 com autenticação correta
         auth_config = None
         if weaviate_api_key:
-            auth_config = weaviate.AuthApiKey(api_key=weaviate_api_key)
+            auth_config = AuthApiKey(api_key=weaviate_api_key)
             
         self.client = weaviate.Client(
             url=weaviate_url,
             auth_client_secret=auth_config
         )
         
-        # Configurar cliente OpenAI
-        openai.api_key = os.getenv("OPENAI_API_KEY", "")
+        # Configurar cliente OpenAI (nova API v1.0.0+)
+        openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        self.openai_client = OpenAI(api_key=openai_api_key)
         
         # Inicializar gerenciadores de contexto
         self.objectives_manager = ObjectivesManager()
@@ -89,7 +98,7 @@ class RAGIntegration:
             
             return documents
         except Exception as e:
-            print(f"Erro ao recuperar documentos: {str(e)}")
+            logger.error(f"Erro ao recuperar documentos: {str(e)}")
             # Em caso de erro, retornar lista vazia
             return []
     
@@ -126,16 +135,17 @@ class RAGIntegration:
 {query}
 
 Com base no contexto fornecido, nas diretrizes estratégicas e no objetivo da conversa, responda à consulta do usuário de forma clara, precisa e alinhada com o objetivo selecionado.
+Inclua citações diretas das fontes quando relevante, indicando de qual documento a informação foi extraída.
 """
     
     def _generate_response(self, prompt: str) -> str:
-        """Gera resposta usando a LLM (OpenAI GPT-4o)"""
+        """Gera resposta usando a LLM (OpenAI GPT-4o) com a nova API v1.0.0+"""
         try:
-            # Chamada à API da OpenAI usando a versão compatível com o cliente instalado
-            response = openai.ChatCompletion.create(
+            # Chamada à API da OpenAI usando a nova interface do cliente v1.0.0+
+            response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "Você é um assistente especializado em discovery de produto, que ajuda a responder consultas com base em documentos, diretrizes e objetivos específicos."},
+                    {"role": "system", "content": "Você é um assistente especializado em discovery de produto, que ajuda a responder consultas com base em documentos, diretrizes e objetivos específicos. Inclua citações diretas das fontes quando relevante."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -145,7 +155,7 @@ Com base no contexto fornecido, nas diretrizes estratégicas e no objetivo da co
             # Extrair e retornar o texto da resposta
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Erro ao gerar resposta com OpenAI: {str(e)}")
+            logger.error(f"Erro ao gerar resposta com OpenAI: {str(e)}")
             return f"Desculpe, ocorreu um erro ao processar sua consulta. Por favor, tente novamente mais tarde."
     
     def _format_sources(self, documents: List[Dict]) -> List[Dict]:
