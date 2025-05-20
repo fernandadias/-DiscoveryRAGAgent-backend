@@ -10,8 +10,12 @@ import json
 class RAGIntegration:
     def __init__(self):
         # Configurar cliente Weaviate usando variáveis de ambiente usando a API v3
-        weaviate_url = os.getenv("WEAVIATE_URL", "https://xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud")
+        weaviate_url = os.getenv("WEAVIATE_URL", "xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud")
         weaviate_api_key = os.getenv("WEAVIATE_API_KEY", "8ohYdBTciU1n6zTwA15nnsZYAA1I4S1nI17s")
+        
+        # Garantir que a URL tenha o prefixo https://
+        if not weaviate_url.startswith("http://") and not weaviate_url.startswith("https://"):
+            weaviate_url = f"https://{weaviate_url}"
         
         # Criar conexão usando a API v3 com autenticação correta
         auth_config = None
