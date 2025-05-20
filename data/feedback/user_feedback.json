@@ -1,0 +1,38 @@
+[
+  {
+    "timestamp": "2025-05-15T15:56:53.386225",
+    "query": "Como podemos melhorar o engajamento dos usuários na Home?",
+    "response": "Para melhorar o engajamento dos usuários na Home, recomendamos: 1) Personalização baseada no perfil e comportamento, 2) Conteúdo relevante e atualizado, 3) Design intuitivo e acessível.",
+    "sources": [
+      {
+        "content": "O engajamento dos usuários pode ser melhorado através de personalização e conteúdo relevante.",
+        "filename": "engajamento_usuarios.pdf",
+        "chunk_id": 3
+      }
+    ],
+    "is_helpful": true,
+    "comments": "Excelente resposta, muito útil!"
+  },
+  {
+    "timestamp": "2025-05-15T15:56:53.387031",
+    "query": "Quais são os principais desafios na personalização da Home?",
+    "response": "Os principais desafios incluem a segmentação de usuários, a relevância do conteúdo e a experiência do usuário.",
+    "sources": [
+      {
+        "content": "A personalização da Home enfrenta desafios como segmentação de usuários e relevância de conteúdo.",
+        "filename": "documento_teste.pdf",
+        "chunk_id": 1
+      }
+    ],
+    "is_helpful": true,
+    "comments": "Resposta muito útil!"
+  },
+  {
+    "timestamp": "2025-05-15T15:56:53.387399",
+    "query": "Como melhorar o engajamento?",
+    "response": "Resposta sobre engajamento",
+    "sources": [],
+    "is_helpful": false,
+    "comments": "Resposta incompleta"
+  }
+]

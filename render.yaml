@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: discovery-rag-agent
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run src/ui/app.py --server.port $PORT --server.address 0.0.0.0
+    envVars:
+      - key: WEAVIATE_URL
+        value: $WEAVIATE_URL
+      - key: WEAVIATE_API_KEY
+        value: $WEAVIATE_API_KEY
+      - key: OPENAI_API_KEY
+        value: $OPENAI_API_KEY
+    healthCheckPath: /_stcore/health
+    autoDeploy: true
