@@ -6,6 +6,7 @@ from src.context.objectives_manager import ObjectivesManager
 from src.context.guidelines_manager import GuidelinesManager
 import json
 import logging
+import requests
 
 # Configuração de logging
 logging.basicConfig(
@@ -38,43 +39,8 @@ class RAGIntegration:
         self.objectives_manager = ObjectivesManager()
         self.guidelines_manager = GuidelinesManager()
         
-        # Inicializar OpenAI Client mais tarde, apenas quando necessário
-        self.openai_client = None
-    
-    def _init_openai_client(self):
-        """Inicializa o cliente OpenAI apenas quando necessário, ignorando qualquer configuração externa"""
-        if self.openai_client is None:
-            try:
-                # Importar OpenAI apenas quando necessário
-                from openai import OpenAI
-                
-                # Obter a chave da API
-                openai_api_key = os.getenv("OPENAI_API_KEY", "")
-                
-                # Criar uma instância limpa do cliente OpenAI, ignorando qualquer configuração externa
-                # Implementação à prova de falhas que ignora argumentos extras
-                try:
-                    # Primeiro, tentar criar com apenas a chave API
-                    self.openai_client = OpenAI(api_key=openai_api_key)
-                    logger.info("Cliente OpenAI inicializado com sucesso usando apenas api_key")
-                except TypeError as e:
-                    # Se falhar, criar uma subclasse que ignora argumentos extras
-                    logger.warning(f"Erro ao inicializar OpenAI com api_key: {str(e)}. Tentando método alternativo.")
-                    
-                    class CustomOpenAI(OpenAI):
-                        def __init__(self, **kwargs):
-                            # Extrair apenas os argumentos que sabemos que são aceitos
-                            api_key = kwargs.get('api_key')
-                            # Chamar o construtor pai apenas com argumentos conhecidos
-                            super().__init__(api_key=api_key)
-                    
-                    # Criar instância da classe personalizada
-                    self.openai_client = CustomOpenAI(api_key=openai_api_key)
-                    logger.info("Cliente OpenAI inicializado com sucesso usando classe personalizada")
-                
-            except Exception as e:
-                logger.error(f"Erro ao inicializar cliente OpenAI: {str(e)}")
-                raise
+        # Não inicializar OpenAI Client aqui, usar método direto
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
     
     def process_query(self, query: str, objective_id: str = None) -> Dict[str, Any]:
         """
@@ -129,6 +95,11 @@ class RAGIntegration:
             # Extrair documentos da resposta
             documents = result.get("data", {}).get("Get", {}).get("Document", [])
             
+            # Verificar se documents é None e retornar lista vazia nesse caso
+            if documents is None:
+                logger.warning("Resultado da consulta ao Weaviate retornou None para documentos")
+                return []
+                
             logger.info(f"Recuperados {len(documents)} documentos relevantes para a consulta: {query[:50]}...")
             return documents
         except Exception as e:
@@ -173,27 +144,47 @@ Inclua citações diretas das fontes quando relevante, indicando de qual documen
 """
     
     def _generate_response(self, prompt: str) -> str:
-        """Gera resposta usando a LLM (OpenAI GPT-4o) com a nova API v1.0.0+"""
+        """Gera resposta usando a LLM (OpenAI GPT-4o) com chamada direta à API"""
         try:
-            # Inicializar o cliente OpenAI apenas quando necessário
-            self._init_openai_client()
+            # Usar chamada direta à API OpenAI via requests em vez do cliente
+            api_key = self.openai_api_key
+            if not api_key:
+                logger.error("API key da OpenAI não configurada")
+                return "Erro: API key da OpenAI não configurada. Por favor, configure a variável de ambiente OPENAI_API_KEY."
             
-            if not self.openai_client:
-                return "Não foi possível inicializar o cliente OpenAI. Por favor, verifique as configurações e tente novamente."
+            # Endpoint da API OpenAI
+            url = "https://api.openai.com/v1/chat/completions"
             
-            # Chamada à API da OpenAI usando a nova interface do cliente v1.0.0+
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
+            # Cabeçalhos da requisição
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            # Corpo da requisição
+            data = {
+                "model": "gpt-4o",
+                "messages": [
                     {"role": "system", "content": "Você é um assistente especializado em discovery de produto, que ajuda a responder consultas com base em documentos, diretrizes e objetivos específicos. Inclua citações diretas das fontes quando relevante."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
-                max_tokens=1500
-            )
+                "temperature": 0.7,
+                "max_tokens": 1500
+            }
             
-            # Extrair e retornar o texto da resposta
-            return response.choices[0].message.content
+            # Fazer a requisição
+            logger.info("Enviando requisição para a API da OpenAI")
+            response = requests.post(url, headers=headers, json=data, timeout=60)
+            
+            # Verificar se a requisição foi bem-sucedida
+            if response.status_code == 200:
+                # Extrair e retornar o texto da resposta
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+            else:
+                logger.error(f"Erro na API da OpenAI: {response.status_code} - {response.text}")
+                return f"Desculpe, ocorreu um erro ao processar sua consulta. Código: {response.status_code}. Por favor, tente novamente mais tarde."
+                
         except Exception as e:
             logger.error(f"Erro ao gerar resposta com OpenAI: {str(e)}")
             return f"Desculpe, ocorreu um erro ao processar sua consulta: {str(e)}. Por favor, tente novamente mais tarde."
