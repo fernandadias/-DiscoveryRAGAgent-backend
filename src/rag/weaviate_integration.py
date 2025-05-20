@@ -46,10 +46,12 @@ class WeaviateClient:
             if self.api_key:
                 auth_config = AuthApiKey(api_key=self.api_key)
             
-            # Conectar ao Weaviate usando o construtor padrão (compatível com todas as versões)
-            self.client = weaviate.Client(
-                url=self.url,
-                auth_client_secret=auth_config
+            # Conectar ao Weaviate usando a API v4
+            self.client = weaviate.WeaviateClient(
+                connection_params=weaviate.ConnectionParams.from_url(
+                    url=self.url,
+                    auth_credentials=auth_config
+                )
             )
             
             # Verificar conexão
@@ -202,12 +204,8 @@ class WeaviateClient:
             # Gerar UUID baseado no conteúdo para evitar duplicatas
             doc_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, text[:1000]))
             
-            # Adicionar documento ao Weaviate
-            self.client.data_object.create(
-                properties,
-                class_name,
-                doc_uuid
-            )
+            # Adicionar documento ao Weaviate usando a API v4
+            self.client.data.creator().with_class_name(class_name).with_id(doc_uuid).with_properties(properties).do()
             
             logger.info(f"Documento adicionado ao Weaviate com ID: {doc_uuid}")
             return doc_uuid
@@ -233,8 +231,8 @@ class WeaviateClient:
             return 0
         
         try:
-            # Iniciar o lote
-            with self.client.batch as batch:
+            # Iniciar o lote usando a API v4
+            with self.client.batch.dynamic() as batch:
                 # Configurar o tamanho do lote
                 batch.batch_size = batch_size
                 
@@ -262,11 +260,11 @@ class WeaviateClient:
                     # Gerar UUID baseado no conteúdo para evitar duplicatas
                     doc_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, text[:1000]))
                     
-                    # Adicionar ao lote
+                    # Adicionar ao lote usando a API v4
                     batch.add_data_object(
-                        properties,
-                        class_name,
-                        doc_uuid
+                        properties=properties,
+                        class_name=class_name,
+                        uuid=doc_uuid
                     )
                     
                     added_count += 1
@@ -298,8 +296,8 @@ class WeaviateClient:
             # Definir as propriedades a serem retornadas
             properties = ["content", "tipo", "filename", "file_path"]
             
-            # Executar a consulta
-            result = (
+            # Executar a consulta usando a API v4
+            response = (
                 self.client.query
                 .get(class_name, properties)
                 .with_near_text({"concepts": [query]})
@@ -308,7 +306,7 @@ class WeaviateClient:
             )
             
             # Extrair documentos do resultado
-            documents = result['data']['Get'][class_name]
+            documents = response.objects
             
             logger.info(f"Busca concluída: {len(documents)} documentos encontrados")
             return documents

@@ -1,6 +1,7 @@
 import os
 from typing import Dict, List, Any
 import weaviate
+from weaviate.auth import AuthApiKey
 from src.context.objectives_manager import ObjectivesManager
 from src.context.guidelines_manager import GuidelinesManager
 import openai
@@ -8,10 +9,18 @@ import json
 
 class RAGIntegration:
     def __init__(self):
-        # Configurar cliente Weaviate usando variáveis de ambiente
+        # Configurar cliente Weaviate usando variáveis de ambiente usando a API v3
+        weaviate_url = os.getenv("WEAVIATE_URL", "https://xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud")
+        weaviate_api_key = os.getenv("WEAVIATE_API_KEY", "8ohYdBTciU1n6zTwA15nnsZYAA1I4S1nI17s")
+        
+        # Criar conexão usando a API v3 com autenticação correta
+        auth_config = None
+        if weaviate_api_key:
+            auth_config = weaviate.AuthApiKey(api_key=weaviate_api_key)
+            
         self.client = weaviate.Client(
-            url=os.getenv("WEAVIATE_URL", "https://xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud"),
-            auth_client_secret=weaviate.AuthApiKey(os.getenv("WEAVIATE_API_KEY", "")),
+            url=weaviate_url,
+            auth_client_secret=auth_config
         )
         
         # Configurar cliente OpenAI
@@ -63,7 +72,7 @@ class RAGIntegration:
     def _retrieve_documents(self, query: str) -> List[Dict]:
         """Recupera documentos relevantes do Weaviate"""
         try:
-            # Implementação da busca semântica no Weaviate
+            # Implementação da busca semântica no Weaviate usando a API v3
             result = self.client.query.get(
                 "Document", 
                 ["content", "title", "metadata"]
@@ -71,7 +80,10 @@ class RAGIntegration:
                 "concepts": [query]
             }).with_limit(5).do()
             
-            return result.get("data", {}).get("Get", {}).get("Document", [])
+            # Extrair documentos da resposta
+            documents = result.get("data", {}).get("Get", {}).get("Document", [])
+            
+            return documents
         except Exception as e:
             print(f"Erro ao recuperar documentos: {str(e)}")
             # Em caso de erro, retornar lista vazia
@@ -115,7 +127,7 @@ Com base no contexto fornecido, nas diretrizes estratégicas e no objetivo da co
     def _generate_response(self, prompt: str) -> str:
         """Gera resposta usando a LLM (OpenAI GPT-4o)"""
         try:
-            # Chamada real à API da OpenAI
+            # Chamada à API da OpenAI usando a versão compatível com o cliente instalado
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
@@ -130,7 +142,6 @@ Com base no contexto fornecido, nas diretrizes estratégicas e no objetivo da co
             return response.choices[0].message.content
         except Exception as e:
             print(f"Erro ao gerar resposta com OpenAI: {str(e)}")
-            # Em caso de erro, retornar mensagem de erro
             return f"Desculpe, ocorreu um erro ao processar sua consulta. Por favor, tente novamente mais tarde."
     
     def _format_sources(self, documents: List[Dict]) -> List[Dict]:

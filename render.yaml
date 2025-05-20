@@ -3,7 +3,7 @@ services:
     name: discovery-rag-agent
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run src/ui/app.py --server.port $PORT --server.address 0.0.0.0
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: WEAVIATE_URL
         value: $WEAVIATE_URL
@@ -11,5 +11,5 @@ services:
         value: $WEAVIATE_API_KEY
       - key: OPENAI_API_KEY
         value: $OPENAI_API_KEY
-    healthCheckPath: /_stcore/health
+    healthCheckPath: /
     autoDeploy: true
