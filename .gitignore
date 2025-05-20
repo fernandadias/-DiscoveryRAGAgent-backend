@@ -42,6 +42,6 @@ Thumbs.db
 
 # Project specific
 data/processed/
-data/raw/
+# data/raw/
 .weaviate/
 *.log
