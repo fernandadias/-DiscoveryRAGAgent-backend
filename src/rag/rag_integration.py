@@ -42,14 +42,36 @@ class RAGIntegration:
         self.openai_client = None
     
     def _init_openai_client(self):
-        """Inicializa o cliente OpenAI apenas quando necessário"""
+        """Inicializa o cliente OpenAI apenas quando necessário, ignorando qualquer configuração externa"""
         if self.openai_client is None:
             try:
                 # Importar OpenAI apenas quando necessário
                 from openai import OpenAI
+                
+                # Obter a chave da API
                 openai_api_key = os.getenv("OPENAI_API_KEY", "")
-                self.openai_client = OpenAI(api_key=openai_api_key)
-                logger.info("Cliente OpenAI inicializado com sucesso")
+                
+                # Criar uma instância limpa do cliente OpenAI, ignorando qualquer configuração externa
+                # Implementação à prova de falhas que ignora argumentos extras
+                try:
+                    # Primeiro, tentar criar com apenas a chave API
+                    self.openai_client = OpenAI(api_key=openai_api_key)
+                    logger.info("Cliente OpenAI inicializado com sucesso usando apenas api_key")
+                except TypeError as e:
+                    # Se falhar, criar uma subclasse que ignora argumentos extras
+                    logger.warning(f"Erro ao inicializar OpenAI com api_key: {str(e)}. Tentando método alternativo.")
+                    
+                    class CustomOpenAI(OpenAI):
+                        def __init__(self, **kwargs):
+                            # Extrair apenas os argumentos que sabemos que são aceitos
+                            api_key = kwargs.get('api_key')
+                            # Chamar o construtor pai apenas com argumentos conhecidos
+                            super().__init__(api_key=api_key)
+                    
+                    # Criar instância da classe personalizada
+                    self.openai_client = CustomOpenAI(api_key=openai_api_key)
+                    logger.info("Cliente OpenAI inicializado com sucesso usando classe personalizada")
+                
             except Exception as e:
                 logger.error(f"Erro ao inicializar cliente OpenAI: {str(e)}")
                 raise
@@ -107,6 +129,7 @@ class RAGIntegration:
             # Extrair documentos da resposta
             documents = result.get("data", {}).get("Get", {}).get("Document", [])
             
+            logger.info(f"Recuperados {len(documents)} documentos relevantes para a consulta: {query[:50]}...")
             return documents
         except Exception as e:
             logger.error(f"Erro ao recuperar documentos: {str(e)}")
@@ -155,6 +178,9 @@ Inclua citações diretas das fontes quando relevante, indicando de qual documen
             # Inicializar o cliente OpenAI apenas quando necessário
             self._init_openai_client()
             
+            if not self.openai_client:
+                return "Não foi possível inicializar o cliente OpenAI. Por favor, verifique as configurações e tente novamente."
+            
             # Chamada à API da OpenAI usando a nova interface do cliente v1.0.0+
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o",
@@ -170,7 +196,7 @@ Inclua citações diretas das fontes quando relevante, indicando de qual documen
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Erro ao gerar resposta com OpenAI: {str(e)}")
-            return f"Desculpe, ocorreu um erro ao processar sua consulta. Por favor, tente novamente mais tarde."
+            return f"Desculpe, ocorreu um erro ao processar sua consulta: {str(e)}. Por favor, tente novamente mais tarde."
     
     def _format_sources(self, documents: List[Dict]) -> List[Dict]:
         """Formata as fontes para retorno na API"""
