@@ -11,30 +11,17 @@ from src.api.models import (
     ConversationListItem,
     ConversationDetail,
     DocumentListItem,
+    ObjectiveListItem,
     SourceModel,
     APIResponse
 )
 
-# Importações simuladas dos módulos existentes
-# Em uma implementação real, estas seriam importações reais dos módulos do DiscoveryRAGAgent
-try:
-    from src.rag.rag_integration import process_query as rag_process_query
-except ImportError:
-    # Função simulada para desenvolvimento
-    def rag_process_query(query: str):
-        return {
-            "response": f"Resposta simulada para: {query}",
-            "sources": [
-                {
-                    "id": "doc1",
-                    "title": "Documento de Exemplo 1",
-                    "content": "Este é um conteúdo de exemplo que seria retornado pelo sistema RAG.",
-                    "url": None
-                }
-            ]
-        }
+from src.rag.rag_integration import RAGIntegration
+from src.context.objectives_manager import ObjectivesManager
 
 router = APIRouter()
+rag_integration = RAGIntegration()
+objectives_manager = ObjectivesManager()
 
 # Simulação de banco de dados em memória para desenvolvimento
 conversations_db = {}
@@ -44,21 +31,46 @@ def generate_uuid():
     """Gera um UUID único para identificadores"""
     return str(uuid.uuid4())
 
+@router.get("/objectives", response_model=List[ObjectiveListItem])
+async def get_objectives():
+    """
+    Retorna a lista de todos os objetivos disponíveis
+    """
+    try:
+        objectives = objectives_manager.get_all_objectives()
+        return objectives
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/objectives/default", response_model=str)
+async def get_default_objective():
+    """
+    Retorna o ID do objetivo padrão (Sobre a discovery)
+    """
+    try:
+        default_objective_id = objectives_manager.get_default_objective_id()
+        return default_objective_id
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/chat", response_model=QueryResponse)
 async def process_query(request: QueryRequest):
     """
     Processa uma consulta do usuário e retorna a resposta do agente IA
     """
     try:
-        # Processa a consulta usando o módulo RAG existente
-        result = rag_process_query(request.query)
+        # Processa a consulta usando o módulo RAG
+        result = rag_integration.process_query(
+            query=request.query,
+            objective_id=request.objective_id
+        )
         
         # Formata a resposta
         sources = [
             SourceModel(
                 id=src.get("id", generate_uuid()),
-                name=src.get("title", "Fonte desconhecida"),
-                snippet=src.get("content", "")[:200],
+                name=src.get("name", "Fonte desconhecida"),
+                snippet=src.get("snippet", "")[:200],
                 link=src.get("url")
             ) for src in result.get("sources", [])
         ]
@@ -151,14 +163,7 @@ async def save_conversation(conversation: ConversationRequest):
             "title": conversation.title,
             "created_at": datetime.now(),
             "updated_at": datetime.now(),
-            "messages": [
-                {
-                    "content": msg.content,
-                    "isUser": msg.isUser,
-                    "timestamp": msg.timestamp
-                }
-                for msg in conversation.messages
-            ]
+            "messages": conversation.messages
         }
         
         return APIResponse(
@@ -175,18 +180,26 @@ async def upload_document(file: UploadFile = File(...)):
     Faz upload de um novo documento para a base de conhecimento
     """
     try:
-        # Simulação de processamento de documento
+        # Verificar se o diretório data/raw existe
+        raw_dir = "data/raw"
+        if not os.path.exists(raw_dir):
+            os.makedirs(raw_dir, exist_ok=True)
+        
+        # Salvar o arquivo no diretório data/raw
+        file_path = os.path.join(raw_dir, file.filename)
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # Registrar o documento no banco de dados simulado
         document_id = generate_uuid()
-        
-        # Em uma implementação real, aqui seria feito o processamento do documento
-        # usando os módulos existentes de ingestão de dados
-        
         documents_db[document_id] = {
             "id": document_id,
             "title": file.filename,
             "type": file.content_type,
             "uploaded_at": datetime.now(),
-            "size": 0  # Em uma implementação real, seria o tamanho real do arquivo
+            "size": len(content),
+            "path": file_path
         }
         
         return APIResponse(
@@ -225,14 +238,35 @@ async def delete_document(document_id: str):
         raise HTTPException(status_code=404, detail="Documento não encontrado")
     
     try:
-        # Em uma implementação real, aqui seria feita a remoção do documento
-        # da base de conhecimento e do sistema de arquivos
+        # Remover o arquivo do sistema de arquivos
+        file_path = documents_db[document_id].get("path")
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
         
+        # Remover do banco de dados simulado
         del documents_db[document_id]
         
         return APIResponse(
             success=True,
             message="Documento removido com sucesso"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/documents/reindex", response_model=APIResponse)
+async def reindex_documents():
+    """
+    Trigger manual para reindexar todos os documentos
+    """
+    try:
+        # Em uma implementação real, aqui seria chamado o processo de ingestão
+        # para reindexar todos os documentos na pasta data/raw
+        
+        # Simulação para desenvolvimento
+        return APIResponse(
+            success=True,
+            message="Reindexação de documentos iniciada com sucesso",
+            data={"status": "processing"}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
