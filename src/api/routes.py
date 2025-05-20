@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 import jwt
 from jwt.exceptions import PyJWTError
+import logging
 
 from src.api.models import (
     QueryRequest, 
@@ -23,6 +24,9 @@ from src.api.models import (
 
 from src.rag.rag_integration import RAGIntegration
 from src.context.objectives_manager import ObjectivesManager
+
+# Configuração de logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 rag_integration = RAGIntegration()
@@ -42,6 +46,44 @@ VALID_CREDENTIALS = {
 # Simulação de banco de dados em memória para desenvolvimento
 conversations_db = {}
 documents_db = {}
+
+# Inicializar alguns documentos de exemplo para garantir que a tela não fique vazia
+def initialize_sample_documents():
+    if not documents_db:
+        sample_docs = [
+            {
+                "id": "doc1",
+                "title": "Guia de Discovery de Produto.pdf",
+                "type": "application/pdf",
+                "uploaded_at": datetime.now(),
+                "size": 1024 * 500,  # 500 KB
+                "path": "data/raw/guia_discovery.pdf"
+            },
+            {
+                "id": "doc2",
+                "title": "Framework de Pesquisa.docx",
+                "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "uploaded_at": datetime.now(),
+                "size": 1024 * 350,  # 350 KB
+                "path": "data/raw/framework_pesquisa.docx"
+            },
+            {
+                "id": "doc3",
+                "title": "Metodologia de Entrevistas.md",
+                "type": "text/markdown",
+                "uploaded_at": datetime.now(),
+                "size": 1024 * 120,  # 120 KB
+                "path": "data/raw/metodologia_entrevistas.md"
+            }
+        ]
+        
+        for doc in sample_docs:
+            documents_db[doc["id"]] = doc
+        
+        logger.info(f"Inicializados {len(sample_docs)} documentos de exemplo")
+
+# Inicializar documentos de exemplo
+initialize_sample_documents()
 
 def generate_uuid():
     """Gera um UUID único para identificadores"""
@@ -79,8 +121,11 @@ async def login(request: LoginRequest):
     """
     Endpoint de login com credenciais hardcoded
     """
+    logger.info(f"Tentativa de login para usuário: {request.username}")
+    
     # Verificar se as credenciais são válidas
     if request.username not in VALID_CREDENTIALS or VALID_CREDENTIALS[request.username] != request.password:
+        logger.warning(f"Falha no login para usuário: {request.username}")
         raise HTTPException(
             status_code=401,
             detail="Nome de usuário ou senha incorretos",
@@ -93,6 +138,7 @@ async def login(request: LoginRequest):
         data={"sub": request.username}, expires_delta=access_token_expires
     )
     
+    logger.info(f"Login bem-sucedido para usuário: {request.username}")
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/objectives", response_model=List[ObjectiveListItem])
@@ -102,8 +148,10 @@ async def get_objectives(current_user: str = Depends(get_current_user)):
     """
     try:
         objectives = objectives_manager.get_all_objectives()
+        logger.info(f"Retornando {len(objectives)} objetivos")
         return objectives
     except Exception as e:
+        logger.error(f"Erro ao obter objetivos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/objectives/default", response_model=str)
@@ -113,8 +161,10 @@ async def get_default_objective(current_user: str = Depends(get_current_user)):
     """
     try:
         default_objective_id = objectives_manager.get_default_objective_id()
+        logger.info(f"Retornando objetivo padrão: {default_objective_id}")
         return default_objective_id
     except Exception as e:
+        logger.error(f"Erro ao obter objetivo padrão: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/chat", response_model=QueryResponse)
@@ -123,6 +173,8 @@ async def process_query(request: QueryRequest, current_user: str = Depends(get_c
     Processa uma consulta do usuário e retorna a resposta do agente IA
     """
     try:
+        logger.info(f"Processando consulta: {request.query[:50]}... (objetivo: {request.objective_id})")
+        
         # Processa a consulta usando o módulo RAG
         result = rag_integration.process_query(
             query=request.query,
@@ -168,12 +220,15 @@ async def process_query(request: QueryRequest, current_user: str = Depends(get_c
         
         conversations_db[conversation_id]["updated_at"] = datetime.now()
         
+        logger.info(f"Consulta processada com sucesso, {len(sources)} fontes encontradas")
+        
         return {
             "response": result["response"],
             "conversation_id": conversation_id,
             "sources": sources
         }
     except Exception as e:
+        logger.error(f"Erro ao processar consulta: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/conversations", response_model=List[ConversationListItem])
@@ -182,7 +237,7 @@ async def get_conversations(current_user: str = Depends(get_current_user)):
     Retorna a lista de todas as conversas salvas
     """
     try:
-        return [
+        conversations = [
             ConversationListItem(
                 id=conv_id,
                 title=conv["title"],
@@ -192,7 +247,10 @@ async def get_conversations(current_user: str = Depends(get_current_user)):
             )
             for conv_id, conv in conversations_db.items()
         ]
+        logger.info(f"Retornando {len(conversations)} conversas")
+        return conversations
     except Exception as e:
+        logger.error(f"Erro ao obter conversas: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
@@ -201,9 +259,11 @@ async def get_conversation(conversation_id: str, current_user: str = Depends(get
     Retorna os detalhes de uma conversa específica
     """
     if conversation_id not in conversations_db:
+        logger.warning(f"Conversa não encontrada: {conversation_id}")
         raise HTTPException(status_code=404, detail="Conversa não encontrada")
     
     try:
+        logger.info(f"Retornando detalhes da conversa: {conversation_id}")
         return ConversationDetail(
             id=conversation_id,
             title=conversations_db[conversation_id]["title"],
@@ -212,6 +272,7 @@ async def get_conversation(conversation_id: str, current_user: str = Depends(get
             messages=conversations_db[conversation_id]["messages"]
         )
     except Exception as e:
+        logger.error(f"Erro ao obter detalhes da conversa: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/conversations", response_model=APIResponse)
@@ -230,12 +291,15 @@ async def save_conversation(conversation: ConversationRequest, current_user: str
             "messages": conversation.messages
         }
         
+        logger.info(f"Conversa salva com sucesso: {conversation_id}")
+        
         return APIResponse(
             success=True,
             message="Conversa salva com sucesso",
             data={"id": conversation_id}
         )
     except Exception as e:
+        logger.error(f"Erro ao salvar conversa: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/upload", response_model=APIResponse)
@@ -266,12 +330,15 @@ async def upload_document(file: UploadFile = File(...), current_user: str = Depe
             "path": file_path
         }
         
+        logger.info(f"Documento enviado com sucesso: {file.filename} (ID: {document_id})")
+        
         return APIResponse(
             success=True,
             message="Documento enviado com sucesso",
             data={"id": document_id}
         )
     except Exception as e:
+        logger.error(f"Erro ao enviar documento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/documents", response_model=List[DocumentListItem])
@@ -280,7 +347,7 @@ async def get_documents(current_user: str = Depends(get_current_user)):
     Retorna a lista de documentos na base de conhecimento
     """
     try:
-        return [
+        documents = [
             DocumentListItem(
                 id=doc_id,
                 title=doc["title"],
@@ -290,7 +357,10 @@ async def get_documents(current_user: str = Depends(get_current_user)):
             )
             for doc_id, doc in documents_db.items()
         ]
+        logger.info(f"Retornando {len(documents)} documentos")
+        return documents
     except Exception as e:
+        logger.error(f"Erro ao obter documentos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/documents/{document_id}", response_model=APIResponse)
@@ -299,6 +369,7 @@ async def delete_document(document_id: str, current_user: str = Depends(get_curr
     Remove um documento da base de conhecimento
     """
     if document_id not in documents_db:
+        logger.warning(f"Documento não encontrado: {document_id}")
         raise HTTPException(status_code=404, detail="Documento não encontrado")
     
     try:
@@ -310,11 +381,14 @@ async def delete_document(document_id: str, current_user: str = Depends(get_curr
         # Remover do banco de dados simulado
         del documents_db[document_id]
         
+        logger.info(f"Documento removido com sucesso: {document_id}")
+        
         return APIResponse(
             success=True,
             message="Documento removido com sucesso"
         )
     except Exception as e:
+        logger.error(f"Erro ao remover documento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/reindex", response_model=APIResponse)
@@ -326,6 +400,8 @@ async def reindex_documents(current_user: str = Depends(get_current_user)):
         # Em uma implementação real, aqui seria chamado o processo de ingestão
         # para reindexar todos os documentos na pasta data/raw
         
+        logger.info("Reindexação de documentos iniciada")
+        
         # Simulação para desenvolvimento
         return APIResponse(
             success=True,
@@ -333,4 +409,5 @@ async def reindex_documents(current_user: str = Depends(get_current_user)):
             data={"status": "processing"}
         )
     except Exception as e:
+        logger.error(f"Erro ao reindexar documentos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
