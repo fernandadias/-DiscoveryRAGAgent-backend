@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from src.api.routes import router
+from src.api.routes import router as main_router
+from src.api.requirements_routes import router as requirements_router
 
 # Criar a aplicação FastAPI
 app = FastAPI(
@@ -21,7 +22,8 @@ app.add_middleware(
 )
 
 # Incluir as rotas da API
-app.include_router(router, prefix="/api")
+app.include_router(main_router, prefix="/api")
+app.include_router(requirements_router, prefix="/api")
 
 # Rota raiz para verificação de status
 @app.get("/")
