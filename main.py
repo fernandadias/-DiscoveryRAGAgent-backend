@@ -11,9 +11,6 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Importar o módulo de segurança OpenAI no início para aplicar o monkey patch
-from src.utils import openai_safe
-
 # Configuração de logging
 logging.basicConfig(
     level=logging.INFO,
@@ -72,12 +69,6 @@ missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
 if missing_vars:
     logger.warning(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
     logger.warning("A aplicação pode não funcionar corretamente sem estas variáveis.")
-
-# Verificar se o monkey patch foi aplicado com sucesso
-if openai_safe.patch_applied:
-    logger.info("Monkey patch para OpenAI aplicado com sucesso")
-else:
-    logger.warning("Falha ao aplicar monkey patch para OpenAI")
 
 # Inicialização da aplicação
 logger.info("Aplicação inicializada com sucesso")

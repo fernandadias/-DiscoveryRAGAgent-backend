@@ -3,15 +3,15 @@ Módulo para classificação automática de objetivos com base na pergunta do us
 
 Este módulo implementa um classificador que analisa o texto da pergunta do usuário
 e identifica automaticamente o objetivo implícito (explorar, validar hipótese, pedir insight).
+Inclui um fallback local para garantir funcionamento mesmo sem acesso à API OpenAI.
 """
 import os
 import logging
 import json
+import re
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
-import openai
-from openai import OpenAI
-from src.utils.openai_safe import create_minimal_openai_client
+from src.utils.openai_safe import create_safe_openai_client
 
 # Configuração de logging
 logging.basicConfig(
@@ -26,6 +26,8 @@ class ObjectiveClassifier:
     
     Este classificador utiliza a API OpenAI para gerar embeddings de texto e
     calcular a similaridade entre a pergunta do usuário e exemplos de cada objetivo.
+    Inclui um fallback local baseado em palavras-chave para garantir funcionamento
+    mesmo sem acesso à API OpenAI.
     """
     
     # Constantes para os tipos de objetivos
@@ -43,23 +45,53 @@ class ObjectiveClassifier:
     # Mapeamento inverso de IDs para objetivos
     OBJECTIVE_ID_MAPPING = {v: k for k, v in OBJECTIVE_MAPPING.items()}
     
-    def __init__(self, api_key: Optional[str] = None, confidence_threshold: float = 0.75):
+    def __init__(self, api_key: Optional[str] = None, confidence_threshold: float = 0.75, use_fallback: bool = True):
         """
         Inicializa o classificador de objetivos.
         
         Args:
             api_key: Chave da API OpenAI (opcional, usa variável de ambiente se não fornecida)
             confidence_threshold: Limiar de confiança para aceitação automática (0.0 a 1.0)
+            use_fallback: Se True, usa o classificador local em caso de falha da API OpenAI
         """
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
             logger.warning("API key não fornecida para o classificador de objetivos")
             
-        # Usar o método mínimo para criar o cliente OpenAI, sem passar kwargs
-        self.client = create_minimal_openai_client(api_key=self.api_key)
         self.confidence_threshold = confidence_threshold
+        self.use_fallback = use_fallback
         self.examples = self._load_examples()
-        self.example_embeddings = self._precompute_embeddings()
+        self.client = None
+        self.example_embeddings = None
+        
+        # Palavras-chave para o classificador local de fallback
+        self.keywords = {
+            self.OBJECTIVE_EXPLORE: [
+                "quais são", "o que descobrimos", "quais foram", "que informações", 
+                "quais são os principais", "o que sabemos", "quais funcionalidades", 
+                "que dados", "quais são os componentes", "o que descobrimos"
+            ],
+            self.OBJECTIVE_VALIDATE: [
+                "hipótese", "confirma", "acreditamos", "isso é verdade", "suposição", 
+                "os dados confirmam", "isso se confirma", "suspeitamos", "teoria", 
+                "validam", "dados suportam"
+            ],
+            self.OBJECTIVE_INSIGHT: [
+                "insights", "o que os dados nos dizem", "padrões", "o que podemos aprender", 
+                "que conclusões", "que aprendizados", "que insights", "o que podemos extrair", 
+                "o que revelam", "o que nos mostram"
+            ]
+        }
+        
+        try:
+            # Tentar inicializar o cliente OpenAI e pré-computar embeddings
+            self.client = create_safe_openai_client(api_key=self.api_key)
+            self.example_embeddings = self._precompute_embeddings()
+            logger.info("Classificador de objetivos inicializado com embeddings OpenAI")
+        except Exception as e:
+            logger.warning(f"Falha ao inicializar cliente OpenAI: {str(e)}. Usando classificador local de fallback.")
+            self.client = None
+            self.example_embeddings = None
         
     def _load_examples(self) -> Dict[str, List[str]]:
         """
@@ -120,6 +152,9 @@ class ObjectiveClassifier:
         Returns:
             Lista de floats representando o embedding do texto
         """
+        if not self.client:
+            raise ValueError("Cliente OpenAI não inicializado")
+            
         try:
             response = self.client.embeddings.create(
                 model="text-embedding-ada-002",
@@ -138,13 +173,19 @@ class ObjectiveClassifier:
         Returns:
             Dicionário com listas de embeddings para cada objetivo
         """
+        if not self.client:
+            return None
+            
         embeddings = {}
         
         for objective, examples in self.examples.items():
             embeddings[objective] = []
             for example in examples:
-                embedding = self._get_embedding(example)
-                embeddings[objective].append(embedding)
+                try:
+                    embedding = self._get_embedding(example)
+                    embeddings[objective].append(embedding)
+                except Exception as e:
+                    logger.error(f"Erro ao pré-computar embedding para exemplo '{example}': {str(e)}")
         
         return embeddings
     
@@ -171,9 +212,9 @@ class ObjectiveClassifier:
             
         return np.dot(a, b) / (norm_a * norm_b)
     
-    def classify_question(self, question: str) -> Tuple[str, float, Dict[str, float]]:
+    def _classify_with_embeddings(self, question: str) -> Tuple[str, float, Dict[str, float]]:
         """
-        Classifica uma pergunta para identificar o objetivo implícito.
+        Classifica uma pergunta usando embeddings e similaridade de cosseno.
         
         Args:
             question: Texto da pergunta do usuário
@@ -206,9 +247,82 @@ class ObjectiveClassifier:
         total = sum(similarities.values())
         normalized_similarities = {obj: sim/total for obj, sim in similarities.items()}
         
-        logger.info(f"Pergunta classificada como '{best_objective}' com confiança {confidence:.4f}")
+        logger.info(f"Pergunta classificada com embeddings como '{best_objective}' com confiança {confidence:.4f}")
         
         return best_objective, confidence, normalized_similarities
+    
+    def _classify_with_keywords(self, question: str) -> Tuple[str, float, Dict[str, float]]:
+        """
+        Classifica uma pergunta usando palavras-chave (fallback local).
+        
+        Args:
+            question: Texto da pergunta do usuário
+            
+        Returns:
+            Tupla com (objetivo_identificado, nível_de_confiança, scores_por_objetivo)
+        """
+        question = question.lower()
+        scores = {}
+        
+        # Calcular pontuação para cada objetivo com base nas palavras-chave
+        for objective, keywords in self.keywords.items():
+            score = 0
+            for keyword in keywords:
+                if keyword.lower() in question:
+                    score += 1
+            
+            # Normalizar pontuação pelo número de palavras-chave
+            scores[objective] = score / len(keywords) if keywords else 0
+        
+        # Identificar o objetivo com maior pontuação
+        best_objective = max(scores, key=scores.get)
+        confidence = scores[best_objective]
+        
+        # Normalizar as pontuações para somar 1.0 (para interpretação como probabilidades)
+        total = sum(scores.values())
+        if total == 0:
+            # Se nenhuma palavra-chave foi encontrada, distribuir uniformemente
+            normalized_scores = {obj: 1.0/len(scores) for obj in scores}
+            confidence = 0.34  # Confiança baixa (1/3 + 0.01)
+            # Usar explore como fallback padrão se nenhuma palavra-chave for encontrada
+            best_objective = self.OBJECTIVE_EXPLORE
+        else:
+            normalized_scores = {obj: score/total for obj, score in scores.items()}
+        
+        logger.info(f"Pergunta classificada com palavras-chave como '{best_objective}' com confiança {confidence:.4f}")
+        
+        return best_objective, confidence, normalized_scores
+    
+    def classify_question(self, question: str) -> Tuple[str, float, Dict[str, float]]:
+        """
+        Classifica uma pergunta para identificar o objetivo implícito.
+        Tenta usar embeddings primeiro, com fallback para classificação baseada em palavras-chave.
+        
+        Args:
+            question: Texto da pergunta do usuário
+            
+        Returns:
+            Tupla com (objetivo_identificado, nível_de_confiança, scores_por_objetivo)
+        """
+        try:
+            # Tentar classificar com embeddings primeiro
+            if self.client and self.example_embeddings:
+                return self._classify_with_embeddings(question)
+        except Exception as e:
+            logger.warning(f"Erro ao classificar com embeddings: {str(e)}. Usando fallback local.")
+        
+        # Fallback para classificação baseada em palavras-chave
+        if self.use_fallback:
+            return self._classify_with_keywords(question)
+        else:
+            # Se fallback não estiver habilitado, retornar explore com confiança baixa
+            default_scores = {
+                self.OBJECTIVE_EXPLORE: 0.5,
+                self.OBJECTIVE_VALIDATE: 0.25,
+                self.OBJECTIVE_INSIGHT: 0.25
+            }
+            logger.warning("Classificação com embeddings falhou e fallback está desabilitado. Usando 'explore' como padrão.")
+            return self.OBJECTIVE_EXPLORE, 0.5, default_scores
     
     def get_objective_id(self, objective: str) -> str:
         """
