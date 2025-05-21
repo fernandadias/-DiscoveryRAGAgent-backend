@@ -1,6 +1,12 @@
+"""
+Módulo para integração do classificador de objetivos ao fluxo de processamento de consultas.
+
+Este módulo modifica o endpoint de chat para incluir a classificação automática
+de objetivos com base na pergunta do usuário.
+"""
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Query, Header, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import uuid
 import os
 from datetime import datetime, timedelta
@@ -20,12 +26,14 @@ from src.api.models import (
     SourceModel,
     APIResponse,
     LoginRequest,
-    TokenResponse
+    TokenResponse,
+    ObjectiveClassificationResponse
 )
 
 from src.rag.rag_integration import RAGIntegration
 from src.context.objectives_manager import ObjectivesManager
 from src.ingest.document_ingestor import DocumentIngestor
+from src.context.objective_classifier import ObjectiveClassifier
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -35,6 +43,7 @@ router = APIRouter()
 rag_integration = RAGIntegration()
 objectives_manager = ObjectivesManager()
 document_ingestor = DocumentIngestor()
+objective_classifier = ObjectiveClassifier()
 
 # Configuração de segurança
 security = HTTPBearer()
@@ -187,18 +196,81 @@ async def get_default_objective(current_user: str = Depends(get_current_user)):
         logger.error(f"Erro ao obter objetivo padrão: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/objectives/classify", response_model=ObjectiveClassificationResponse)
+async def classify_objective(request: QueryRequest, current_user: str = Depends(get_current_user)):
+    """
+    Classifica automaticamente o objetivo de uma pergunta
+    """
+    try:
+        logger.info(f"Classificando objetivo para pergunta: {request.query[:50]}...")
+        
+        # Classificar a pergunta usando o classificador de objetivos
+        objective_type, confidence, scores = objective_classifier.classify_question(request.query)
+        
+        # Obter o ID do objetivo correspondente
+        objective_id = objective_classifier.get_objective_id(objective_type)
+        
+        # Verificar se a confiança é suficiente para aceitação automática
+        auto_accept = objective_classifier.should_accept_automatically(confidence)
+        
+        # Obter a descrição amigável do objetivo
+        objective_description = objective_classifier.get_objective_description(objective_type)
+        
+        logger.info(f"Pergunta classificada como '{objective_type}' (ID: {objective_id}) com confiança {confidence:.4f}")
+        
+        return {
+            "objective_id": objective_id,
+            "objective_type": objective_type,
+            "objective_description": objective_description,
+            "confidence": confidence,
+            "scores": scores,
+            "auto_accept": auto_accept
+        }
+    except Exception as e:
+        logger.error(f"Erro ao classificar objetivo: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/chat", response_model=QueryResponse)
 async def process_query(request: QueryRequest, current_user: str = Depends(get_current_user)):
     """
     Processa uma consulta do usuário e retorna a resposta do agente IA
     """
     try:
-        logger.info(f"Processando consulta: {request.query[:50]}... (objetivo: {request.objective_id})")
+        logger.info(f"Processando consulta: {request.query[:50]}...")
+        
+        # Se não houver objetivo especificado, classificar automaticamente
+        objective_id = request.objective_id
+        auto_classified = False
+        
+        if not objective_id:
+            try:
+                # Classificar a pergunta usando o classificador de objetivos
+                objective_type, confidence, _ = objective_classifier.classify_question(request.query)
+                
+                # Obter o ID do objetivo correspondente
+                objective_id = objective_classifier.get_objective_id(objective_type)
+                
+                # Verificar se a confiança é suficiente para aceitação automática
+                auto_accept = objective_classifier.should_accept_automatically(confidence)
+                
+                if auto_accept:
+                    logger.info(f"Objetivo classificado automaticamente: {objective_type} (ID: {objective_id}) com confiança {confidence:.4f}")
+                    auto_classified = True
+                else:
+                    # Se a confiança for baixa, usar o objetivo padrão
+                    logger.info(f"Confiança baixa ({confidence:.4f}) para classificação automática, usando objetivo padrão")
+                    objective_id = objectives_manager.get_default_objective_id()
+            except Exception as e:
+                logger.warning(f"Erro na classificação automática de objetivo: {str(e)}")
+                # Em caso de erro, usar o objetivo padrão
+                objective_id = objectives_manager.get_default_objective_id()
+        
+        logger.info(f"Processando consulta com objetivo: {objective_id} (auto-classificado: {auto_classified})")
         
         # Processa a consulta usando o módulo RAG
         result = rag_integration.process_query(
             query=request.query,
-            objective_id=request.objective_id
+            objective_id=objective_id
         )
         
         # Formata a resposta
@@ -231,11 +303,22 @@ async def process_query(request: QueryRequest, current_user: str = Depends(get_c
             "timestamp": datetime.now()
         })
         
+        # Adicionar informação sobre classificação automática na resposta
+        response_text = result["response"]
+        if auto_classified:
+            objective_description = objective_classifier.get_objective_description(
+                objective_classifier.get_objective_from_id(objective_id)
+            )
+            response_prefix = f"[Objetivo identificado automaticamente: {objective_description}]\n\n"
+            response_text = response_prefix + response_text
+        
         conversations_db[conversation_id]["messages"].append({
-            "content": result["response"],
+            "content": response_text,
             "isUser": False,
             "timestamp": datetime.now(),
-            "sources": sources
+            "sources": sources,
+            "objective_id": objective_id,
+            "auto_classified": auto_classified
         })
         
         conversations_db[conversation_id]["updated_at"] = datetime.now()
@@ -243,9 +326,11 @@ async def process_query(request: QueryRequest, current_user: str = Depends(get_c
         logger.info(f"Consulta processada com sucesso, {len(sources)} fontes encontradas")
         
         return {
-            "response": result["response"],
+            "response": response_text,
             "conversation_id": conversation_id,
-            "sources": sources
+            "sources": sources,
+            "objective_id": objective_id,
+            "auto_classified": auto_classified
         }
     except Exception as e:
         logger.error(f"Erro ao processar consulta: {str(e)}")
@@ -431,84 +516,63 @@ async def get_document_preview(document_id: str, current_user: str = Depends(get
     
     try:
         document = documents_db[document_id]
-        file_path = document.get("path")
+        file_path = document["path"]
         
-        if not file_path or not os.path.exists(file_path):
-            return {"content": "Arquivo não encontrado no sistema."}
+        # Extrair conteúdo do documento (implementação simplificada)
+        content = "Conteúdo não disponível para pré-visualização"
         
-        # Extrair uma prévia do conteúdo com base no tipo de arquivo
-        content = "Pré-visualização não disponível para este tipo de arquivo."
+        if file_path.endswith(".txt") or file_path.endswith(".md"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read(2000)  # Limitar a 2000 caracteres
         
-        if file_path.lower().endswith('.pdf'):
-            try:
-                from PyPDF2 import PdfReader
-                reader = PdfReader(file_path)
-                preview_text = ""
-                # Extrair texto das primeiras 3 páginas ou menos
-                for i in range(min(3, len(reader.pages))):
-                    page = reader.pages[i]
-                    preview_text += page.extract_text() + "\n\n--- Página " + str(i+1) + " ---\n\n"
-                content = preview_text[:5000] + "..." if len(preview_text) > 5000 else preview_text
-            except Exception as e:
-                content = f"Erro ao extrair texto do PDF: {str(e)}"
-        
-        elif file_path.lower().endswith(('.txt', '.md')):
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    text = f.read(5000)
-                    content = text + "..." if len(text) == 5000 else text
-            except Exception as e:
-                content = f"Erro ao ler arquivo de texto: {str(e)}"
-        
-        logger.info(f"Pré-visualização gerada para documento: {document_id}")
+        logger.info(f"Retornando pré-visualização do documento: {document_id}")
         
         return {
+            "id": document_id,
+            "title": document["title"],
             "content": content,
-            "metadata": {
-                "title": document["title"],
-                "type": document["type"],
-                "size": document["size"],
-                "uploaded_at": document["uploaded_at"]
-            }
+            "type": document["type"]
         }
     except Exception as e:
-        logger.error(f"Erro ao gerar pré-visualização do documento: {str(e)}")
+        logger.error(f"Erro ao obter pré-visualização do documento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/documents/reindex", response_model=APIResponse)
-async def reindex_documents(current_user: str = Depends(get_current_user)):
+@router.delete("/documents/{document_id}", response_model=APIResponse)
+async def delete_document(document_id: str, current_user: str = Depends(get_current_user)):
     """
-    Reindexar todos os documentos no Weaviate
+    Remove um documento da base de conhecimento
     """
+    if document_id not in documents_db:
+        logger.warning(f"Documento não encontrado: {document_id}")
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    
     try:
-        # Recarregar documentos reais
-        load_real_documents()
+        document = documents_db[document_id]
+        file_path = document["path"]
         
-        # Iniciar processo de reindexação
-        success_count = 0
-        error_count = 0
+        # Remover arquivo físico
+        if os.path.exists(file_path):
+            os.remove(file_path)
         
-        for doc_id, doc in documents_db.items():
-            file_path = doc.get("path")
-            if file_path and os.path.exists(file_path):
-                try:
-                    # Processar e indexar o documento
-                    success = document_ingestor.process_and_index_file(file_path)
-                    if success:
-                        success_count += 1
-                    else:
-                        error_count += 1
-                except Exception as e:
-                    logger.error(f"Erro ao reindexar documento {doc['title']}: {str(e)}")
-                    error_count += 1
+        # Remover do banco de dados simulado
+        del documents_db[document_id]
         
-        logger.info(f"Reindexação concluída: {success_count} documentos processados com sucesso, {error_count} erros")
+        # Remover do índice Weaviate (implementação simplificada)
+        try:
+            if document_ingestor.client and document_ingestor.client.is_ready():
+                document_ingestor.client.data_object.delete(
+                    class_name="Document",
+                    uuid=document_id
+                )
+        except Exception as e:
+            logger.warning(f"Erro ao remover documento do Weaviate: {str(e)}")
+        
+        logger.info(f"Documento removido com sucesso: {document_id}")
         
         return APIResponse(
             success=True,
-            message=f"Reindexação concluída: {success_count} documentos processados com sucesso, {error_count} erros",
-            data={"success_count": success_count, "error_count": error_count}
+            message="Documento removido com sucesso"
         )
     except Exception as e:
-        logger.error(f"Erro ao reindexar documentos: {str(e)}")
+        logger.error(f"Erro ao remover documento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
