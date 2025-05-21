@@ -42,8 +42,8 @@ app.add_middleware(
 )
 
 # Incluir rotas
-app.include_router(api_router)
-app.include_router(requirements_router)
+app.include_router(api_router, prefix="/api")
+app.include_router(requirements_router, prefix="/api")
 
 # Rota de verificação de saúde
 @app.get("/health")
