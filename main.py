@@ -1,39 +1,83 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+"""
+Módulo principal para inicialização da aplicação
 
-from src.api.routes import router as main_router
+Este módulo configura e inicializa a aplicação FastAPI.
+"""
+
+import os
+import sys
+import logging
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+# Importar o módulo de segurança OpenAI no início para aplicar o monkey patch
+from src.utils import openai_safe
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Importar rotas
+from src.api.routes import router as api_router
 from src.api.requirements_routes import router as requirements_router
 
-# Criar a aplicação FastAPI
+# Criar aplicação FastAPI
 app = FastAPI(
     title="DiscoveryRAGAgent API",
-    description="API REST para o agente de IA especializado em Ideação e Discovery de Produto",
+    description="API para o agente RAG de Discovery",
     version="1.0.0"
 )
 
-# Configuração de CORS para permitir requisições do frontend
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especificar domínios permitidos
+    allow_origins=["*"],  # Permitir todas as origens
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Permitir todos os métodos
+    allow_headers=["*"],  # Permitir todos os cabeçalhos
 )
 
-# Incluir as rotas da API
-app.include_router(main_router, prefix="/api")
-app.include_router(requirements_router, prefix="/api")
+# Incluir rotas
+app.include_router(api_router)
+app.include_router(requirements_router)
 
-# Rota raiz para verificação de status
-@app.get("/")
-async def root():
-    return {
-        "status": "online",
-        "message": "DiscoveryRAGAgent API está funcionando",
-        "docs": "/docs"
-    }
+# Rota de verificação de saúde
+@app.get("/health")
+async def health_check():
+    """
+    Verifica a saúde da aplicação.
+    """
+    return {"status": "ok", "message": "API está funcionando corretamente"}
 
-# Iniciar o servidor se este arquivo for executado diretamente
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# Manipulador de exceções
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """
+    Manipulador global de exceções.
+    """
+    logger.error(f"Erro não tratado: {exc}")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": f"Erro interno do servidor: {str(exc)}"}
+    )
+
+# Verificar variáveis de ambiente necessárias
+required_env_vars = ["OPENAI_API_KEY", "WEAVIATE_URL"]
+missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+
+if missing_vars:
+    logger.warning(f"Variáveis de ambiente ausentes: {', '.join(missing_vars)}")
+    logger.warning("A aplicação pode não funcionar corretamente sem estas variáveis.")
+
+# Verificar se o monkey patch foi aplicado com sucesso
+if openai_safe.patch_applied:
+    logger.info("Monkey patch para OpenAI aplicado com sucesso")
+else:
+    logger.warning("Falha ao aplicar monkey patch para OpenAI")
+
+# Inicialização da aplicação
+logger.info("Aplicação inicializada com sucesso")
