@@ -11,3 +11,6 @@ pydantic==2.5.2
 python-multipart==0.0.6
 markdown==3.5.2
 pyjwt==2.8.0
+PyPDF2==3.0.1
+textract==1.6.5
+docx2txt==0.8
