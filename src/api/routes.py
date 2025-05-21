@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import jwt
 from jwt.exceptions import PyJWTError
 import logging
+import glob
 
 from src.api.models import (
     QueryRequest, 
@@ -24,13 +25,16 @@ from src.api.models import (
 
 from src.rag.rag_integration import RAGIntegration
 from src.context.objectives_manager import ObjectivesManager
+from src.ingest.document_ingestor import DocumentIngestor
 
 # Configuração de logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 rag_integration = RAGIntegration()
 objectives_manager = ObjectivesManager()
+document_ingestor = DocumentIngestor()
 
 # Configuração de segurança
 security = HTTPBearer()
@@ -47,43 +51,59 @@ VALID_CREDENTIALS = {
 conversations_db = {}
 documents_db = {}
 
-# Inicializar alguns documentos de exemplo para garantir que a tela não fique vazia
-def initialize_sample_documents():
-    if not documents_db:
-        sample_docs = [
-            {
-                "id": "doc1",
-                "title": "Guia de Discovery de Produto.pdf",
-                "type": "application/pdf",
-                "uploaded_at": datetime.now(),
-                "size": 1024 * 500,  # 500 KB
-                "path": "data/raw/guia_discovery.pdf"
-            },
-            {
-                "id": "doc2",
-                "title": "Framework de Pesquisa.docx",
-                "type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "uploaded_at": datetime.now(),
-                "size": 1024 * 350,  # 350 KB
-                "path": "data/raw/framework_pesquisa.docx"
-            },
-            {
-                "id": "doc3",
-                "title": "Metodologia de Entrevistas.md",
-                "type": "text/markdown",
-                "uploaded_at": datetime.now(),
-                "size": 1024 * 120,  # 120 KB
-                "path": "data/raw/metodologia_entrevistas.md"
+# Função para carregar documentos reais do diretório data/raw
+def load_real_documents():
+    """Carrega os documentos reais do diretório data/raw para o banco de dados em memória"""
+    try:
+        raw_dir = "data/raw"
+        if not os.path.exists(raw_dir):
+            os.makedirs(raw_dir, exist_ok=True)
+            logger.info(f"Diretório {raw_dir} criado")
+            return
+        
+        # Limpar o banco de dados em memória para evitar duplicatas
+        documents_db.clear()
+        
+        # Listar todos os arquivos no diretório
+        file_paths = []
+        for ext in ['*.pdf', '*.txt', '*.md', '*.docx']:
+            file_paths.extend(glob.glob(os.path.join(raw_dir, ext)))
+        
+        # Adicionar cada arquivo ao banco de dados em memória
+        for file_path in file_paths:
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            file_type = os.path.splitext(file_path)[1].lower()
+            
+            # Mapear extensão para tipo MIME
+            mime_types = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.md': 'text/markdown',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
             }
-        ]
+            
+            content_type = mime_types.get(file_type, 'application/octet-stream')
+            
+            # Gerar ID único para o documento
+            doc_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, file_path))
+            
+            # Adicionar ao banco de dados em memória
+            documents_db[doc_id] = {
+                "id": doc_id,
+                "title": file_name,
+                "type": content_type,
+                "uploaded_at": datetime.fromtimestamp(os.path.getctime(file_path)),
+                "size": file_size,
+                "path": file_path
+            }
         
-        for doc in sample_docs:
-            documents_db[doc["id"]] = doc
-        
-        logger.info(f"Inicializados {len(sample_docs)} documentos de exemplo")
+        logger.info(f"Carregados {len(file_paths)} documentos reais do diretório {raw_dir}")
+    except Exception as e:
+        logger.error(f"Erro ao carregar documentos reais: {str(e)}")
 
-# Inicializar documentos de exemplo
-initialize_sample_documents()
+# Carregar documentos reais ao iniciar
+load_real_documents()
 
 def generate_uuid():
     """Gera um UUID único para identificadores"""
@@ -302,6 +322,29 @@ async def save_conversation(conversation: ConversationRequest, current_user: str
         logger.error(f"Erro ao salvar conversa: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.delete("/conversations/{conversation_id}", response_model=APIResponse)
+async def delete_conversation(conversation_id: str, current_user: str = Depends(get_current_user)):
+    """
+    Remove uma conversa do histórico
+    """
+    if conversation_id not in conversations_db:
+        logger.warning(f"Conversa não encontrada: {conversation_id}")
+        raise HTTPException(status_code=404, detail="Conversa não encontrada")
+    
+    try:
+        # Remover do banco de dados simulado
+        del conversations_db[conversation_id]
+        
+        logger.info(f"Conversa removida com sucesso: {conversation_id}")
+        
+        return APIResponse(
+            success=True,
+            message="Conversa removida com sucesso"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao remover conversa: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/documents/upload", response_model=APIResponse)
 async def upload_document(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     """
@@ -320,7 +363,7 @@ async def upload_document(file: UploadFile = File(...), current_user: str = Depe
             f.write(content)
         
         # Registrar o documento no banco de dados simulado
-        document_id = generate_uuid()
+        document_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, file_path))
         documents_db[document_id] = {
             "id": document_id,
             "title": file.filename,
@@ -330,11 +373,14 @@ async def upload_document(file: UploadFile = File(...), current_user: str = Depe
             "path": file_path
         }
         
-        logger.info(f"Documento enviado com sucesso: {file.filename} (ID: {document_id})")
+        # Processar e indexar o documento no Weaviate
+        success = document_ingestor.process_and_index_file(file_path)
+        
+        logger.info(f"Documento enviado e indexado com sucesso: {file.filename} (ID: {document_id})")
         
         return APIResponse(
             success=True,
-            message="Documento enviado com sucesso",
+            message="Documento enviado e indexado com sucesso",
             data={"id": document_id}
         )
     except Exception as e:
@@ -347,6 +393,16 @@ async def get_documents(current_user: str = Depends(get_current_user)):
     Retorna a lista de documentos na base de conhecimento
     """
     try:
+        # Recarregar documentos reais para garantir que a lista esteja atualizada
+        load_real_documents()
+        
+        # Ordenar documentos por data de upload (mais recentes primeiro)
+        sorted_docs = sorted(
+            documents_db.items(),
+            key=lambda x: x[1]["uploaded_at"],
+            reverse=True
+        )
+        
         documents = [
             DocumentListItem(
                 id=doc_id,
@@ -355,58 +411,103 @@ async def get_documents(current_user: str = Depends(get_current_user)):
                 uploaded_at=doc["uploaded_at"],
                 size=doc["size"]
             )
-            for doc_id, doc in documents_db.items()
+            for doc_id, doc in sorted_docs
         ]
+        
         logger.info(f"Retornando {len(documents)} documentos")
         return documents
     except Exception as e:
         logger.error(f"Erro ao obter documentos: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.delete("/documents/{document_id}", response_model=APIResponse)
-async def delete_document(document_id: str, current_user: str = Depends(get_current_user)):
+@router.get("/documents/{document_id}/preview", response_model=dict)
+async def get_document_preview(document_id: str, current_user: str = Depends(get_current_user)):
     """
-    Remove um documento da base de conhecimento
+    Retorna uma pré-visualização do conteúdo de um documento
     """
     if document_id not in documents_db:
         logger.warning(f"Documento não encontrado: {document_id}")
         raise HTTPException(status_code=404, detail="Documento não encontrado")
     
     try:
-        # Remover o arquivo do sistema de arquivos
-        file_path = documents_db[document_id].get("path")
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        document = documents_db[document_id]
+        file_path = document.get("path")
         
-        # Remover do banco de dados simulado
-        del documents_db[document_id]
+        if not file_path or not os.path.exists(file_path):
+            return {"content": "Arquivo não encontrado no sistema."}
         
-        logger.info(f"Documento removido com sucesso: {document_id}")
+        # Extrair uma prévia do conteúdo com base no tipo de arquivo
+        content = "Pré-visualização não disponível para este tipo de arquivo."
         
-        return APIResponse(
-            success=True,
-            message="Documento removido com sucesso"
-        )
+        if file_path.lower().endswith('.pdf'):
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(file_path)
+                preview_text = ""
+                # Extrair texto das primeiras 3 páginas ou menos
+                for i in range(min(3, len(reader.pages))):
+                    page = reader.pages[i]
+                    preview_text += page.extract_text() + "\n\n--- Página " + str(i+1) + " ---\n\n"
+                content = preview_text[:5000] + "..." if len(preview_text) > 5000 else preview_text
+            except Exception as e:
+                content = f"Erro ao extrair texto do PDF: {str(e)}"
+        
+        elif file_path.lower().endswith(('.txt', '.md')):
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    text = f.read(5000)
+                    content = text + "..." if len(text) == 5000 else text
+            except Exception as e:
+                content = f"Erro ao ler arquivo de texto: {str(e)}"
+        
+        logger.info(f"Pré-visualização gerada para documento: {document_id}")
+        
+        return {
+            "content": content,
+            "metadata": {
+                "title": document["title"],
+                "type": document["type"],
+                "size": document["size"],
+                "uploaded_at": document["uploaded_at"]
+            }
+        }
     except Exception as e:
-        logger.error(f"Erro ao remover documento: {str(e)}")
+        logger.error(f"Erro ao gerar pré-visualização do documento: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/reindex", response_model=APIResponse)
 async def reindex_documents(current_user: str = Depends(get_current_user)):
     """
-    Trigger manual para reindexar todos os documentos
+    Reindexar todos os documentos no Weaviate
     """
     try:
-        # Em uma implementação real, aqui seria chamado o processo de ingestão
-        # para reindexar todos os documentos na pasta data/raw
+        # Recarregar documentos reais
+        load_real_documents()
         
-        logger.info("Reindexação de documentos iniciada")
+        # Iniciar processo de reindexação
+        success_count = 0
+        error_count = 0
         
-        # Simulação para desenvolvimento
+        for doc_id, doc in documents_db.items():
+            file_path = doc.get("path")
+            if file_path and os.path.exists(file_path):
+                try:
+                    # Processar e indexar o documento
+                    success = document_ingestor.process_and_index_file(file_path)
+                    if success:
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    logger.error(f"Erro ao reindexar documento {doc['title']}: {str(e)}")
+                    error_count += 1
+        
+        logger.info(f"Reindexação concluída: {success_count} documentos processados com sucesso, {error_count} erros")
+        
         return APIResponse(
             success=True,
-            message="Reindexação de documentos iniciada com sucesso",
-            data={"status": "processing"}
+            message=f"Reindexação concluída: {success_count} documentos processados com sucesso, {error_count} erros",
+            data={"success_count": success_count, "error_count": error_count}
         )
     except Exception as e:
         logger.error(f"Erro ao reindexar documentos: {str(e)}")

@@ -1,19 +1,40 @@
 import os
+from datetime import datetime
+import logging
+from typing import Dict, List, Any, Optional
+import weaviate
+from weaviate.auth import AuthApiKey
+from PyPDF2 import PdfReader
 import subprocess
 import tempfile
 import uuid
 import json
-from typing import Dict, List, Any, Optional
-import weaviate
-from PyPDF2 import PdfReader
-import re
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class DocumentIngestor:
     def __init__(self):
         # Configurar cliente Weaviate usando variáveis de ambiente
+        weaviate_url = os.getenv("WEAVIATE_URL", "https://xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud")
+        weaviate_api_key = os.getenv("WEAVIATE_API_KEY", "8ohYdBTciU1n6zTwA15nnsZYAA1I4S1nI17s")
+        
+        # Garantir que a URL tenha o prefixo https://
+        if not weaviate_url.startswith("http://") and not weaviate_url.startswith("https://"):
+            weaviate_url = f"https://{weaviate_url}"
+        
+        # Criar conexão com autenticação correta
+        auth_config = None
+        if weaviate_api_key:
+            auth_config = AuthApiKey(api_key=weaviate_api_key)
+            
         self.client = weaviate.Client(
-            url=os.getenv("WEAVIATE_URL", "https://xoplne4asfshde3fsprroq.c0.us-west3.gcp.weaviate.cloud"),
-            auth_client_secret=weaviate.AuthApiKey(os.getenv("WEAVIATE_API_KEY", "")),
+            url=weaviate_url,
+            auth_client_secret=auth_config
         )
         
         # Verificar se o schema existe, caso contrário, criar
@@ -65,9 +86,12 @@ class DocumentIngestor:
                 }
                 
                 self.client.schema.create_class(document_class)
-                print("Schema criado com sucesso.")
+                logger.info("Schema criado com sucesso.")
+            else:
+                logger.info("Schema já existe.")
         except Exception as e:
-            print(f"Erro ao verificar/criar schema: {str(e)}")
+            logger.error(f"Erro ao verificar/criar schema: {str(e)}")
+            raise
     
     def process_pdf(self, file_path: str) -> Dict[str, Any]:
         """
@@ -97,7 +121,7 @@ class DocumentIngestor:
                 "metadata": metadata
             }
         except Exception as e:
-            print(f"Erro ao processar PDF {file_path}: {str(e)}")
+            logger.error(f"Erro ao processar PDF {file_path}: {str(e)}")
             return {
                 "title": os.path.basename(file_path),
                 "content": f"Erro ao processar documento: {str(e)}",
@@ -111,10 +135,17 @@ class DocumentIngestor:
             with open(file_path, 'rb') as file:
                 pdf = PdfReader(file)
                 for page in pdf.pages:
-                    text += page.extract_text() + "\n\n"
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n\n"
+            
+            if not text.strip():
+                logger.warning(f"PyPDF2 não extraiu texto de {file_path}, tentando método alternativo")
+                return self._extract_text_with_pdftotext(file_path)
+                
             return text
         except Exception as e:
-            print(f"Erro ao extrair texto com PyPDF2: {str(e)}")
+            logger.error(f"Erro ao extrair texto com PyPDF2: {str(e)}")
             # Tentar método alternativo se PyPDF2 falhar
             return self._extract_text_with_pdftotext(file_path)
     
@@ -130,7 +161,7 @@ class DocumentIngestor:
                 with open(temp_file.name, 'r', encoding='utf-8', errors='replace') as f:
                     return f.read()
         except Exception as e:
-            print(f"Erro ao extrair texto com pdftotext: {str(e)}")
+            logger.error(f"Erro ao extrair texto com pdftotext: {str(e)}")
             return f"Não foi possível extrair o texto do documento. Erro: {str(e)}"
     
     def _extract_metadata_with_pdfinfo(self, file_path: str) -> Dict[str, Any]:
@@ -155,8 +186,80 @@ class DocumentIngestor:
             
             return metadata
         except Exception as e:
-            print(f"Erro ao extrair metadados com pdfinfo: {str(e)}")
+            logger.error(f"Erro ao extrair metadados com pdfinfo: {str(e)}")
             return {"file_path": file_path, "error": str(e)}
+    
+    def process_docx(self, file_path: str) -> Dict[str, Any]:
+        """
+        Processa um arquivo DOCX, extraindo texto
+        
+        Args:
+            file_path: Caminho para o arquivo DOCX
+            
+        Returns:
+            Dict contendo título, conteúdo e metadados do documento
+        """
+        try:
+            # Tentar extrair texto usando docx2txt se disponível
+            try:
+                import docx2txt
+                text = docx2txt.process(file_path)
+            except ImportError:
+                # Fallback para extração simples
+                text = self._extract_text_with_textract(file_path)
+            
+            return {
+                "title": os.path.basename(file_path),
+                "content": text,
+                "metadata": {
+                    "file_path": file_path,
+                    "file_type": "docx",
+                    "processed_at": str(datetime.now())
+                }
+            }
+        except Exception as e:
+            logger.error(f"Erro ao processar DOCX {file_path}: {str(e)}")
+            return {
+                "title": os.path.basename(file_path),
+                "content": f"Erro ao processar documento: {str(e)}",
+                "metadata": {"error": str(e)}
+            }
+    
+    def _extract_text_with_textract(self, file_path: str) -> str:
+        """Extrai texto usando textract se disponível"""
+        try:
+            import textract
+            return textract.process(file_path, encoding='utf-8').decode('utf-8')
+        except ImportError:
+            logger.warning("textract não está instalado, usando método alternativo")
+            # Tentar usar antiword para DOC ou unzip + grep para DOCX
+            if file_path.lower().endswith('.docx'):
+                return self._extract_text_from_docx_with_unzip(file_path)
+            else:
+                return f"Não foi possível extrair texto do documento {file_path}. Instale textract ou docx2txt."
+    
+    def _extract_text_from_docx_with_unzip(self, file_path: str) -> str:
+        """Extrai texto de DOCX usando unzip e grep"""
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Descompactar o arquivo DOCX
+                subprocess.run(["unzip", "-q", file_path, "word/document.xml", "-d", temp_dir], check=True)
+                
+                # Extrair texto do XML
+                xml_path = os.path.join(temp_dir, "word/document.xml")
+                if os.path.exists(xml_path):
+                    with open(xml_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Extrair texto entre tags w:t
+                    import re
+                    text_parts = re.findall(r'<w:t[^>]*>(.*?)</w:t>', content)
+                    return ' '.join(text_parts)
+                
+                return "Não foi possível extrair texto do documento DOCX."
+        except Exception as e:
+            logger.error(f"Erro ao extrair texto do DOCX com unzip: {str(e)}")
+            return f"Erro ao extrair texto: {str(e)}"
     
     def chunk_document(self, document: Dict[str, Any], chunk_size: int = 1000, overlap: int = 200) -> List[Dict[str, Any]]:
         """
@@ -233,6 +336,8 @@ class DocumentIngestor:
             # Dividir o documento em chunks
             chunks = self.chunk_document(document)
             
+            logger.info(f"Indexando documento '{document['title']}' em {len(chunks)} chunks")
+            
             # Criar um batch para indexação
             with self.client.batch as batch:
                 batch.batch_size = batch_size
@@ -254,7 +359,7 @@ class DocumentIngestor:
             
             return True
         except Exception as e:
-            print(f"Erro ao indexar documento: {str(e)}")
+            logger.error(f"Erro ao indexar documento: {str(e)}")
             return False
     
     def process_and_index_file(self, file_path: str) -> bool:
@@ -270,12 +375,14 @@ class DocumentIngestor:
         try:
             # Verificar se o arquivo existe
             if not os.path.exists(file_path):
-                print(f"Arquivo não encontrado: {file_path}")
+                logger.warning(f"Arquivo não encontrado: {file_path}")
                 return False
             
             # Verificar a extensão do arquivo
             _, ext = os.path.splitext(file_path)
             ext = ext.lower()
+            
+            logger.info(f"Processando arquivo: {file_path} (tipo: {ext})")
             
             if ext == '.pdf':
                 # Processar PDF
@@ -294,14 +401,28 @@ class DocumentIngestor:
                         "processed_at": str(datetime.now())
                     }
                 }
+            elif ext in ['.docx', '.doc']:
+                # Processar arquivo Word
+                document = self.process_docx(file_path)
             else:
-                print(f"Formato de arquivo não suportado: {ext}")
+                logger.warning(f"Formato de arquivo não suportado: {ext}")
                 return False
             
+            # Verificar se o conteúdo foi extraído com sucesso
+            if not document["content"] or document["content"].startswith("Erro ao processar documento"):
+                logger.warning(f"Não foi possível extrair conteúdo de {file_path}")
+                return False
+                
             # Indexar o documento
-            return self.index_document(document)
+            success = self.index_document(document)
+            if success:
+                logger.info(f"Documento indexado com sucesso: {file_path}")
+            else:
+                logger.error(f"Falha ao indexar documento: {file_path}")
+            
+            return success
         except Exception as e:
-            print(f"Erro ao processar e indexar arquivo {file_path}: {str(e)}")
+            logger.error(f"Erro ao processar e indexar arquivo {file_path}: {str(e)}")
             return False
     
     def reindex_all_documents(self, directory: str = "data/raw") -> Dict[str, Any]:
@@ -325,8 +446,10 @@ class DocumentIngestor:
         try:
             # Verificar se o diretório existe
             if not os.path.exists(directory):
-                print(f"Diretório não encontrado: {directory}")
+                logger.warning(f"Diretório não encontrado: {directory}")
                 return stats
+            
+            logger.info(f"Iniciando reindexação de documentos em: {directory}")
             
             # Listar todos os arquivos no diretório
             for root, _, files in os.walk(directory):
@@ -338,20 +461,24 @@ class DocumentIngestor:
                     stats["total"] += 1
                     
                     # Verificar se é um formato suportado
-                    if ext in ['.pdf', '.txt', '.md']:
+                    if ext in ['.pdf', '.txt', '.md', '.docx', '.doc']:
                         # Processar e indexar o arquivo
                         success = self.process_and_index_file(file_path)
                         
                         if success:
                             stats["success"] += 1
+                            logger.info(f"Documento processado com sucesso: {file_path}")
                         else:
                             stats["failed"] += 1
                             stats["failed_files"].append(file_path)
+                            logger.error(f"Falha ao processar documento: {file_path}")
                     else:
                         stats["skipped"] += 1
+                        logger.warning(f"Documento ignorado (formato não suportado): {file_path}")
             
+            logger.info(f"Reindexação concluída. Estatísticas: {stats}")
             return stats
         except Exception as e:
-            print(f"Erro ao reindexar documentos: {str(e)}")
+            logger.error(f"Erro ao reindexar documentos: {str(e)}")
             stats["error"] = str(e)
             return stats
