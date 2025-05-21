@@ -31,11 +31,20 @@ class RAGIntegration:
         auth_config = None
         if weaviate_api_key:
             auth_config = AuthApiKey(api_key=weaviate_api_key)
-            
-        self.client = weaviate.Client(
-            url=weaviate_url,
-            auth_client_secret=auth_config
-        )
+        
+        try:    
+            self.client = weaviate.Client(
+                url=weaviate_url,
+                auth_client_secret=auth_config
+            )
+            # Verificar conexão imediatamente
+            self.weaviate_connected = self.client.is_ready()
+            if not self.weaviate_connected:
+                logger.warning("Não foi possível conectar ao Weaviate durante a inicialização")
+        except Exception as e:
+            logger.error(f"Erro ao inicializar cliente Weaviate: {str(e)}")
+            self.client = None
+            self.weaviate_connected = False
         
         # Inicializar gerenciadores de contexto
         self.objectives_manager = ObjectivesManager()
@@ -105,44 +114,52 @@ class RAGIntegration:
         Returns:
             Dict contendo a resposta e as fontes utilizadas
         """
-        # Se não houver objetivo especificado, usar o padrão
-        if not objective_id:
-            objective_id = self.objectives_manager.get_default_objective_id()
-        
-        # 1. Expandir a consulta para melhorar a recuperação
-        expanded_query = self._expand_query(query)
-        logger.info(f"Consulta expandida: {expanded_query}")
-        
-        # 2. Recuperar documentos relevantes usando busca híbrida
-        relevant_docs = self.search_documents(query, expanded_query, limit=15)
-        
-        # 3. Verificar se há documentos específicos sobre o tema da consulta
-        if len(relevant_docs) < 5:
-            # Tentar busca por palavras-chave como fallback
-            fallback_docs = self._keyword_search(query)
-            # Combinar com os documentos já recuperados
-            relevant_docs = self._merge_documents(relevant_docs, fallback_docs)
-        
-        # 4. Construir o contexto com os documentos recuperados
-        rag_context = self._build_rag_context(relevant_docs, query)
-        
-        # 5. Obter o conteúdo do objetivo selecionado
-        objective_content = self.objectives_manager.get_objective_content(objective_id)
-        
-        # 6. Obter todas as diretrizes
-        guidelines_content = self.guidelines_manager.get_all_guidelines_content()
-        
-        # 7. Construir o prompt completo para a LLM
-        prompt = self._build_prompt(query, rag_context, guidelines_content, objective_content)
-        
-        # 8. Gerar resposta usando a LLM (OpenAI GPT-4o)
-        response = self._generate_response(prompt)
-        
-        # 9. Formatar e retornar o resultado
-        return {
-            "response": response,
-            "sources": self._format_sources(relevant_docs)
-        }
+        try:
+            # Se não houver objetivo especificado, usar o padrão
+            if not objective_id:
+                objective_id = self.objectives_manager.get_default_objective_id()
+            
+            # 1. Expandir a consulta para melhorar a recuperação
+            expanded_query = self._expand_query(query)
+            logger.info(f"Consulta expandida: {expanded_query}")
+            
+            # 2. Recuperar documentos relevantes usando busca híbrida
+            relevant_docs = self.search_documents(query, expanded_query, limit=15)
+            
+            # 3. Verificar se há documentos específicos sobre o tema da consulta
+            if len(relevant_docs) < 5:
+                # Tentar busca por palavras-chave como fallback
+                fallback_docs = self._keyword_search(query)
+                # Combinar com os documentos já recuperados
+                relevant_docs = self._merge_documents(relevant_docs, fallback_docs)
+            
+            # 4. Construir o contexto com os documentos recuperados
+            rag_context = self._build_rag_context(relevant_docs, query)
+            
+            # 5. Obter o conteúdo do objetivo selecionado
+            objective_content = self.objectives_manager.get_objective_content(objective_id)
+            
+            # 6. Obter todas as diretrizes
+            guidelines_content = self.guidelines_manager.get_all_guidelines_content()
+            
+            # 7. Construir o prompt completo para a LLM
+            prompt = self._build_prompt(query, rag_context, guidelines_content, objective_content)
+            
+            # 8. Gerar resposta usando a LLM (OpenAI GPT-4o)
+            response = self._generate_response(prompt)
+            
+            # 9. Formatar e retornar o resultado
+            return {
+                "response": response,
+                "sources": self._format_sources(relevant_docs)
+            }
+        except Exception as e:
+            logger.error(f"Erro no processamento da consulta: {str(e)}")
+            # Fallback para resposta de erro
+            return {
+                "response": f"Desculpe, ocorreu um erro ao processar sua consulta. Por favor, tente novamente mais tarde.\n\nDetalhes técnicos: {str(e)}",
+                "sources": []
+            }
     
     def search_documents(self, query: str, expanded_query: str = None, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -165,20 +182,34 @@ class RAGIntegration:
         
         try:
             # Verificar se o cliente está conectado
-            if not self.client.is_ready():
+            if not self.client or not self.weaviate_connected:
                 logger.error("Não foi possível conectar ao Weaviate")
-                return []
+                return self._keyword_search(query, limit)
+            
+            # Verificar conexão novamente
+            try:
+                self.weaviate_connected = self.client.is_ready()
+                if not self.weaviate_connected:
+                    logger.error("Weaviate não está pronto")
+                    return self._keyword_search(query, limit)
+            except Exception as e:
+                logger.error(f"Erro ao verificar conexão com Weaviate: {str(e)}")
+                return self._keyword_search(query, limit)
             
             # Verificar configuração do vectorizer
-            schema = self.client.schema.get()
-            document_class = None
-            for class_obj in schema.get("classes", []):
-                if class_obj.get("class") == "Document":
-                    document_class = class_obj
-                    break
-            
-            vectorizer = document_class.get("vectorizer") if document_class else "none"
-            logger.info(f"Vectorizer configurado: {vectorizer}")
+            try:
+                schema = self.client.schema.get()
+                document_class = None
+                for class_obj in schema.get("classes", []):
+                    if class_obj.get("class") == "Document":
+                        document_class = class_obj
+                        break
+                
+                vectorizer = document_class.get("vectorizer") if document_class else "none"
+                logger.info(f"Vectorizer configurado: {vectorizer}")
+            except Exception as e:
+                logger.error(f"Erro ao obter schema do Weaviate: {str(e)}")
+                vectorizer = "none"
             
             results = []
             
@@ -265,6 +296,10 @@ class RAGIntegration:
             
             # Obter todos os documentos para filtragem local
             try:
+                if not self.client or not self.weaviate_connected:
+                    # Fallback para busca local em arquivos
+                    return self._local_file_search(query, expanded_terms, limit)
+                
                 all_docs = self.client.query.get(
                     "Document", 
                     ["content", "title", "semantic_context", "keywords", "file_name", "file_path"]
@@ -302,11 +337,82 @@ class RAGIntegration:
                 
                 return top_docs
             except Exception as e:
-                logger.error(f"Erro na busca por palavras-chave: {str(e)}")
-                return []
+                logger.error(f"Erro na busca por palavras-chave no Weaviate: {str(e)}")
+                # Fallback para busca local em arquivos
+                return self._local_file_search(query, expanded_terms, limit)
                 
         except Exception as e:
             logger.error(f"Erro na busca por palavras-chave: {str(e)}")
+            return []
+    
+    def _local_file_search(self, query: str, expanded_terms: set, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Busca em arquivos locais quando o Weaviate não está disponível
+        """
+        try:
+            logger.info("Realizando busca local em arquivos como fallback")
+            
+            # Diretório de dados
+            data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "raw")
+            
+            if not os.path.exists(data_dir):
+                logger.error(f"Diretório de dados não encontrado: {data_dir}")
+                return []
+            
+            # Listar arquivos
+            files = os.listdir(data_dir)
+            logger.info(f"Encontrados {len(files)} arquivos para busca local")
+            
+            # Processar arquivos de texto
+            relevant_docs = []
+            
+            for file_name in files:
+                file_path = os.path.join(data_dir, file_name)
+                
+                if not os.path.isfile(file_path):
+                    continue
+                
+                # Extrair extensão
+                _, ext = os.path.splitext(file_name)
+                ext = ext.lower()
+                
+                # Processar apenas arquivos de texto
+                if ext in ['.txt', '.md', '.csv']:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                    except Exception as e:
+                        logger.warning(f"Erro ao ler arquivo {file_name}: {str(e)}")
+                        continue
+                    
+                    # Calcular pontuação
+                    score = 0
+                    content_lower = content.lower()
+                    
+                    for term in expanded_terms:
+                        score += content_lower.count(term)
+                    
+                    if score > 0:
+                        relevant_docs.append({
+                            "title": file_name,
+                            "content": content,
+                            "file_name": file_name,
+                            "file_path": file_path,
+                            "score": score
+                        })
+            
+            # Ordenar por pontuação
+            relevant_docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+            
+            # Limitar ao número solicitado
+            top_docs = relevant_docs[:limit]
+            
+            logger.info(f"Busca local encontrou {len(relevant_docs)} documentos relevantes, retornando os {len(top_docs)} mais relevantes")
+            
+            return top_docs
+            
+        except Exception as e:
+            logger.error(f"Erro na busca local em arquivos: {str(e)}")
             return []
     
     def _is_about_profiles(self, query: str) -> bool:
@@ -367,37 +473,37 @@ class RAGIntegration:
     
     def _expand_query(self, query: str) -> str:
         """
-        Expande a consulta para melhorar a recuperação semântica
-        Adiciona termos relacionados e sinônimos para aumentar a chance de encontrar documentos relevantes
+        Expande a consulta com termos relacionados para melhorar a recuperação
+        
+        Args:
+            query: Consulta original do usuário
+            
+        Returns:
+            Consulta expandida com termos relacionados
         """
-        query_lower = query.lower()
+        # Extrair palavras-chave da consulta
+        query_words = [word.lower() for word in re.findall(r'\w+', query.lower()) if len(word) > 3]
+        
+        # Expandir com termos relacionados
         expanded_terms = []
         
-        # Verificar se a consulta contém termos-chave e adicionar expansões relevantes
-        for topic, expansions in self.topic_expansions.items():
-            if topic in query_lower or any(term in query_lower for term in expansions[:3]):
-                # Adicionar todas as expansões para este tópico
-                expanded_terms.extend(expansions)
+        # 1. Adicionar termos relacionados a cada palavra-chave
+        for word in query_words:
+            for topic, expansions in self.topic_expansions.items():
+                if word in topic or topic in word:
+                    expanded_terms.extend(expansions)
         
-        # Expansão específica para consultas sobre perfis de usuários
+        # 2. Adicionar termos específicos para consultas sobre perfis
         if self._is_about_profiles(query):
             expanded_terms.extend([
                 "quem são os usuários", "quais são os perfis", "tipos de usuários",
-                "segmentos de clientes", "características dos usuários",
-                "comportamento dos clientes", "necessidades dos usuários",
-                "personas identificadas", "público-alvo definido",
-                "segmentação de mercado", "perfil demográfico"
+                "segmentos de clientes", "características dos usuários", "comportamento dos clientes",
+                "necessidades dos usuários", "personas identificadas", "público-alvo definido",
+                "segmentação de mercado", "perfil demográfico", "perfis já identificados",
+                "usuários conhecidos", "personas existentes", "segmentos definidos",
+                "clientes atuais", "base de usuários"
             ])
-            
-            # Se a consulta menciona "conhecidos" ou "identificados", adicionar termos específicos
-            if "conhec" in query_lower or "identific" in query_lower:
-                expanded_terms.extend([
-                    "perfis já identificados", "usuários conhecidos",
-                    "personas existentes", "segmentos definidos",
-                    "clientes atuais", "base de usuários"
-                ])
         
-        # Combinar a consulta original com os termos expandidos
         if expanded_terms:
             # Remover duplicatas mantendo a ordem
             unique_expansions = []
@@ -575,7 +681,7 @@ Formate sua resposta em markdown para melhor legibilidade.
             # Usar a API OpenAI v1.0.0+
             from openai import OpenAI
             
-            # Inicializar cliente OpenAI
+            # Inicializar cliente OpenAI - REMOVIDO PARÂMETRO PROXIES QUE CAUSAVA ERRO
             client = OpenAI(api_key=self.openai_api_key)
             
             # Chamar a API
@@ -599,18 +705,22 @@ Formate sua resposta em markdown para melhor legibilidade.
             return f"""
 # Resposta baseada nos documentos disponíveis
 
-Encontrei algumas informações relevantes para sua pergunta nos documentos disponíveis, mas ocorreu um erro ao gerar uma resposta completa.
+Desculpe, encontrei um problema técnico ao gerar a resposta completa. Aqui está um resumo baseado nos documentos encontrados:
 
-## Informações disponíveis
+## Informações Relevantes
 
-Os documentos contêm informações sobre o tema consultado. Recomendo reformular sua pergunta ou tentar novamente mais tarde.
+Os documentos disponíveis contêm informações sobre a consulta realizada, mas não foi possível processar uma resposta detalhada devido a um erro técnico.
 
-## Erro técnico
+## Recomendação
 
-Ocorreu um erro ao processar sua consulta: {str(e)}
+Por favor, tente reformular sua pergunta ou entre em contato com o suporte técnico mencionando o seguinte erro:
+"{str(e)}"
+
+---
+*Nota: Esta é uma resposta de fallback gerada devido a um erro no processamento da resposta completa.*
 """
     
-    def _format_sources(self, documents: List[Dict]) -> List[Dict[str, str]]:
+    def _format_sources(self, documents: List[Dict]) -> List[Dict]:
         """
         Formata as fontes para inclusão na resposta
         
@@ -618,46 +728,23 @@ Ocorreu um erro ao processar sua consulta: {str(e)}
             documents: Lista de documentos recuperados
             
         Returns:
-            Lista de dicionários com informações das fontes
+            Lista de fontes formatadas
         """
         sources = []
         
-        for doc in documents[:5]:  # Limitar a 5 fontes
-            title = doc.get("title", "")
+        for i, doc in enumerate(documents[:5]):  # Limitar a 5 fontes
+            title = doc.get("title", f"Documento {i+1}")
+            content = doc.get("content", "")
             file_name = doc.get("file_name", "")
             
-            if title and file_name:
-                sources.append({
-                    "title": title,
-                    "file": file_name
-                })
+            # Extrair um snippet relevante (primeiros 200 caracteres)
+            snippet = content[:200] + "..." if len(content) > 200 else content
+            
+            sources.append({
+                "id": str(i+1),
+                "name": title,
+                "snippet": snippet,
+                "link": file_name
+            })
         
         return sources
-
-# Função para gerar resposta (para uso direto)
-def generate_response(query: str, guidelines: str = None) -> Dict[str, Any]:
-    """
-    Gera uma resposta para a consulta do usuário com base nos documentos relevantes e diretrizes
-    
-    Args:
-        query: Consulta do usuário
-        guidelines: Diretrizes para a resposta (opcional)
-        
-    Returns:
-        Dicionário com a resposta e metadados
-    """
-    try:
-        # Inicializar RAG
-        rag = RAGIntegration()
-        
-        # Processar a consulta
-        result = rag.process_query(query)
-        
-        return result
-    except Exception as e:
-        logger.error(f"Erro ao gerar resposta: {str(e)}")
-        return {
-            "response": f"Ocorreu um erro ao processar sua consulta: {str(e)}",
-            "sources": [],
-            "query": query
-        }
