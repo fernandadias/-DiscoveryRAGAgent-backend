@@ -144,7 +144,7 @@ class RAGConnector:
             str: Resposta gerada ou mensagem de erro
         """
         try:
-            # Inicializar cliente OpenAI
+            # Inicializar cliente OpenAI - REMOVIDO PARÂMETRO PROXIES QUE CAUSAVA ERRO
             openai_client = OpenAI(api_key=self.openai_api_key)
             
             # Preparar contexto para o prompt
