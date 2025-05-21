@@ -7,6 +7,8 @@ from src.context.guidelines_manager import GuidelinesManager
 import json
 import logging
 import requests
+import re
+from datetime import datetime
 
 # Configuração de logging
 logging.basicConfig(
@@ -41,6 +43,56 @@ class RAGIntegration:
         
         # Não inicializar OpenAI Client aqui, usar método direto
         self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        
+        # Configurar variável de ambiente OPENAI_APIKEY para Weaviate
+        if self.openai_api_key and not os.getenv("OPENAI_APIKEY"):
+            os.environ["OPENAI_APIKEY"] = self.openai_api_key
+        
+        # Mapeamento de tópicos para expansão semântica
+        self.topic_expansions = {
+            "perfil": [
+                "perfis de usuários", "personas", "segmentação de clientes", 
+                "público-alvo", "comportamento do usuário", "necessidades do cliente",
+                "características do usuário", "tipos de clientes", "segmentos de mercado",
+                "usuários típicos", "clientes ideais", "target", "demografia"
+            ],
+            "usuário": [
+                "cliente", "consumidor", "pessoa", "indivíduo", "utilizador",
+                "comprador", "público", "audiência", "target", "prospect"
+            ],
+            "discovery": [
+                "pesquisa", "investigação", "exploração", "análise", "estudo",
+                "levantamento", "diagnóstico", "avaliação", "descoberta", "insights"
+            ],
+            "produto": [
+                "serviço", "solução", "oferta", "aplicativo", "app", "plataforma",
+                "ferramenta", "sistema", "funcionalidade", "recurso"
+            ],
+            "stone": [
+                "ton", "pagar.me", "pagarme", "pagamentos", "maquininha",
+                "adquirência", "gateway", "financeiro", "banking", "conta"
+            ],
+            "objetivo": [
+                "meta", "propósito", "finalidade", "alvo", "intenção",
+                "missão", "visão", "estratégia", "plano", "direção"
+            ],
+            "experiência": [
+                "ux", "ui", "usabilidade", "interface", "interação",
+                "jornada", "fluxo", "design", "layout", "navegação"
+            ],
+            "problema": [
+                "dor", "dificuldade", "desafio", "obstáculo", "barreira",
+                "limitação", "restrição", "impedimento", "complicação", "questão"
+            ],
+            "solução": [
+                "resolução", "resposta", "abordagem", "estratégia", "tática",
+                "método", "técnica", "prática", "implementação", "execução"
+            ],
+            "mercado": [
+                "indústria", "setor", "nicho", "segmento", "área",
+                "campo", "domínio", "espaço", "ambiente", "ecossistema"
+            ]
+        }
     
     def process_query(self, query: str, objective_id: str = None) -> Dict[str, Any]:
         """
@@ -57,140 +109,308 @@ class RAGIntegration:
         if not objective_id:
             objective_id = self.objectives_manager.get_default_objective_id()
         
-        # 1. Recuperar documentos relevantes do Weaviate
-        relevant_docs = self._retrieve_documents(query)
+        # 1. Expandir a consulta para melhorar a recuperação
+        expanded_query = self._expand_query(query)
+        logger.info(f"Consulta expandida: {expanded_query}")
         
-        # 2. Construir o contexto com os documentos recuperados
-        rag_context = self._build_rag_context(relevant_docs)
+        # 2. Recuperar documentos relevantes usando busca híbrida
+        relevant_docs = self.search_documents(query, expanded_query, limit=15)
         
-        # 3. Obter o conteúdo do objetivo selecionado
+        # 3. Verificar se há documentos específicos sobre o tema da consulta
+        if len(relevant_docs) < 5:
+            # Tentar busca por palavras-chave como fallback
+            fallback_docs = self._keyword_search(query)
+            # Combinar com os documentos já recuperados
+            relevant_docs = self._merge_documents(relevant_docs, fallback_docs)
+        
+        # 4. Construir o contexto com os documentos recuperados
+        rag_context = self._build_rag_context(relevant_docs, query)
+        
+        # 5. Obter o conteúdo do objetivo selecionado
         objective_content = self.objectives_manager.get_objective_content(objective_id)
         
-        # 4. Obter todas as diretrizes
+        # 6. Obter todas as diretrizes
         guidelines_content = self.guidelines_manager.get_all_guidelines_content()
         
-        # 5. Construir o prompt completo para a LLM
+        # 7. Construir o prompt completo para a LLM
         prompt = self._build_prompt(query, rag_context, guidelines_content, objective_content)
         
-        # 6. Gerar resposta usando a LLM (OpenAI GPT-4o)
+        # 8. Gerar resposta usando a LLM (OpenAI GPT-4o)
         response = self._generate_response(prompt)
         
-        # 7. Formatar e retornar o resultado
+        # 9. Formatar e retornar o resultado
         return {
             "response": response,
             "sources": self._format_sources(relevant_docs)
         }
     
-    def _retrieve_documents(self, query: str) -> List[Dict]:
-        """Recupera documentos relevantes do Weaviate"""
-        try:
-            # Expandir a consulta para melhorar a recuperação semântica
+    def search_documents(self, query: str, expanded_query: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Busca documentos relevantes para a consulta usando uma abordagem híbrida:
+        1. Busca semântica (se vectorizer disponível)
+        2. Busca por palavras-chave como fallback
+        
+        Args:
+            query: Consulta do usuário
+            expanded_query: Consulta expandida com termos relacionados (opcional)
+            limit: Número máximo de documentos a retornar
+            
+        Returns:
+            Lista de documentos relevantes
+        """
+        logger.info(f"Buscando documentos para: '{query}'")
+        
+        if not expanded_query:
             expanded_query = self._expand_query(query)
-            logger.info(f"Consulta expandida: {expanded_query}")
-            
-            # Implementação da busca semântica no Weaviate usando a API v3
-            result = self.client.query.get(
-                "Document", 
-                ["content", "title", "metadata"]
-            ).with_near_text({
-                "concepts": [expanded_query]
-            }).with_limit(15).do()  # Aumentado para 15 resultados
-            
-            # Extrair documentos da resposta
-            documents = result.get("data", {}).get("Get", {}).get("Document", [])
-            
-            # Verificar se documents é None e retornar lista vazia nesse caso
-            if documents is None:
-                logger.warning("Resultado da consulta ao Weaviate retornou None para documentos")
+        
+        try:
+            # Verificar se o cliente está conectado
+            if not self.client.is_ready():
+                logger.error("Não foi possível conectar ao Weaviate")
                 return []
             
-            # Reranking dos resultados para priorizar os mais relevantes
-            reranked_docs = self._rerank_documents(documents, query)
-                
-            logger.info(f"Recuperados {len(reranked_docs)} documentos relevantes para a consulta: {query[:50]}...")
-            return reranked_docs
-        except Exception as e:
-            logger.error(f"Erro ao recuperar documentos: {str(e)}")
-            # Em caso de erro, tentar busca alternativa com termos específicos
-            return self._fallback_retrieval(query)
-    
-    def _fallback_retrieval(self, query: str) -> List[Dict]:
-        """Método alternativo de recuperação em caso de falha na busca principal"""
-        try:
-            logger.info("Usando método alternativo de recuperação")
+            # Verificar configuração do vectorizer
+            schema = self.client.schema.get()
+            document_class = None
+            for class_obj in schema.get("classes", []):
+                if class_obj.get("class") == "Document":
+                    document_class = class_obj
+                    break
             
-            # Extrair palavras-chave da consulta
-            keywords = [word.lower() for word in query.split() if len(word) > 3]
+            vectorizer = document_class.get("vectorizer") if document_class else "none"
+            logger.info(f"Vectorizer configurado: {vectorizer}")
             
-            # Se houver palavras-chave específicas relacionadas a perfis, adicionar termos específicos
-            if any(kw in query.lower() for kw in ["perfil", "usuário", "cliente", "persona"]):
-                keywords.extend(["perfil", "usuários", "clientes", "personas"])
+            results = []
             
-            # Buscar documentos para cada palavra-chave
-            all_docs = []
-            for keyword in keywords[:5]:  # Limitar a 5 palavras-chave para evitar muitas consultas
+            # Tentar busca semântica se vectorizer não for 'none'
+            if vectorizer != "none":
                 try:
-                    result = self.client.query.get(
+                    logger.info("Tentando busca semântica...")
+                    semantic_results = self.client.query.get(
                         "Document", 
-                        ["content", "title", "metadata"]
+                        ["content", "title", "semantic_context", "keywords", "file_name", "file_path"]
                     ).with_near_text({
-                        "concepts": [keyword]
-                    }).with_limit(5).do()
+                        "concepts": [expanded_query]
+                    }).with_limit(limit).do()
                     
-                    docs = result.get("data", {}).get("Get", {}).get("Document", [])
-                    if docs:
-                        all_docs.extend(docs)
-                except Exception:
-                    continue
+                    documents = semantic_results.get("data", {}).get("Get", {}).get("Document", [])
+                    logger.info(f"Busca semântica retornou {len(documents)} documentos")
+                    
+                    if documents:
+                        results.extend(documents)
+                except Exception as e:
+                    logger.warning(f"Erro na busca semântica: {str(e)}")
             
-            # Remover duplicatas (baseado no título)
-            unique_docs = []
-            seen_titles = set()
-            for doc in all_docs:
-                title = doc.get("title", "")
-                if title not in seen_titles:
-                    seen_titles.add(title)
-                    unique_docs.append(doc)
+            # Se não houver resultados ou vectorizer for 'none', usar busca por palavras-chave
+            if not results:
+                logger.info("Usando busca por palavras-chave como fallback...")
+                keyword_results = self._keyword_search(query, limit)
+                if keyword_results:
+                    results.extend(keyword_results)
             
-            return unique_docs[:10]  # Limitar a 10 documentos
+            # Reranking dos resultados para priorizar os mais relevantes
+            if results:
+                results = self._rerank_documents(results, query)
+            
+            logger.info(f"Busca híbrida retornou {len(results)} documentos relevantes")
+            return results
+            
         except Exception as e:
-            logger.error(f"Erro no método alternativo de recuperação: {str(e)}")
+            logger.error(f"Erro na busca de documentos: {str(e)}")
+            # Em caso de erro, tentar busca por palavras-chave como último recurso
+            return self._keyword_search(query, limit)
+    
+    def _keyword_search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Realiza busca por palavras-chave nos documentos
+        
+        Args:
+            query: Consulta do usuário
+            limit: Número máximo de documentos a retornar
+            
+        Returns:
+            Lista de documentos relevantes
+        """
+        try:
+            logger.info(f"Realizando busca por palavras-chave para: '{query}'")
+            
+            # Extrair palavras-chave da consulta (palavras com mais de 3 caracteres)
+            query_words = [word.lower() for word in re.findall(r'\w+', query.lower()) if len(word) > 3]
+            
+            # Expandir com sinônimos e termos relacionados
+            expanded_terms = set(query_words)
+            
+            # Mapeamento de sinônimos e termos relacionados para termos comuns
+            synonyms = {
+                "perfil": ["persona", "usuário", "cliente", "público", "segmento"],
+                "usuário": ["cliente", "pessoa", "consumidor", "utilizador"],
+                "cliente": ["usuário", "pessoa", "consumidor", "utilizador"],
+                "segmento": ["grupo", "categoria", "classe", "tipo"],
+                "comportamento": ["hábito", "costume", "prática", "ação"],
+                "necessidade": ["demanda", "requisito", "exigência", "precisão"],
+                "problema": ["dor", "dificuldade", "obstáculo", "desafio"],
+                "objetivo": ["meta", "propósito", "finalidade", "alvo"],
+                "discovery": ["pesquisa", "investigação", "exploração", "análise"],
+                "experiência": ["ux", "ui", "usabilidade", "interface"],
+                "produto": ["serviço", "solução", "oferta", "aplicativo"],
+                "mercado": ["indústria", "setor", "nicho", "segmento"]
+            }
+            
+            # Expandir cada termo da consulta
+            for word in query_words:
+                if word in synonyms:
+                    expanded_terms.update(synonyms[word])
+            
+            logger.info(f"Termos expandidos: {expanded_terms}")
+            
+            # Obter todos os documentos para filtragem local
+            try:
+                all_docs = self.client.query.get(
+                    "Document", 
+                    ["content", "title", "semantic_context", "keywords", "file_name", "file_path"]
+                ).with_limit(1000).do()
+                
+                documents = all_docs.get("data", {}).get("Get", {}).get("Document", [])
+                logger.info(f"Recuperados {len(documents)} documentos para filtragem local")
+                
+                # Filtrar documentos que contêm os termos expandidos
+                relevant_docs = []
+                for doc in documents:
+                    content = doc.get("content", "").lower()
+                    title = doc.get("title", "").lower()
+                    
+                    # Calcular pontuação de relevância baseada na frequência dos termos
+                    score = 0
+                    for term in expanded_terms:
+                        # Pontuação no título tem peso maior
+                        title_count = title.count(term) * 3
+                        content_count = content.count(term)
+                        score += title_count + content_count
+                    
+                    # Adicionar documento se tiver alguma pontuação
+                    if score > 0:
+                        doc["score"] = score
+                        relevant_docs.append(doc)
+                
+                # Ordenar por pontuação (mais relevantes primeiro)
+                relevant_docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+                
+                # Limitar ao número solicitado
+                top_docs = relevant_docs[:limit]
+                
+                logger.info(f"Busca por palavras-chave encontrou {len(relevant_docs)} documentos relevantes, retornando os {len(top_docs)} mais relevantes")
+                
+                return top_docs
+            except Exception as e:
+                logger.error(f"Erro na busca por palavras-chave: {str(e)}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Erro na busca por palavras-chave: {str(e)}")
             return []
+    
+    def _is_about_profiles(self, query: str) -> bool:
+        """Verifica se a consulta é sobre perfis de usuários"""
+        profile_terms = [
+            "perfil", "perfis", "usuário", "usuários", "cliente", "clientes", 
+            "persona", "personas", "segmentação", "público-alvo", "target"
+        ]
+        query_lower = query.lower()
+        return any(term in query_lower for term in profile_terms)
+    
+    def _has_profile_documents(self, documents: List[Dict]) -> bool:
+        """Verifica se há documentos específicos sobre perfis na lista"""
+        if not documents:
+            return False
+            
+        profile_terms = [
+            "perfil", "perfis", "usuário", "usuários", "cliente", "clientes", 
+            "persona", "personas", "segmentação", "público-alvo"
+        ]
+        
+        for doc in documents[:5]:  # Verificar apenas os 5 primeiros documentos
+            content = doc.get("content", "").lower()
+            # Verificar se o documento tem uma concentração significativa de termos sobre perfis
+            term_count = sum(content.count(term) for term in profile_terms)
+            if term_count > 5:  # Limiar arbitrário para considerar um documento sobre perfis
+                return True
+                
+        return False
+    
+    def _merge_documents(self, primary_docs: List[Dict], secondary_docs: List[Dict]) -> List[Dict]:
+        """Combina duas listas de documentos, removendo duplicatas e priorizando os primários"""
+        if not primary_docs:
+            return secondary_docs
+            
+        if not secondary_docs:
+            return primary_docs
+            
+        # Usar um conjunto para rastrear documentos já incluídos (pelo título)
+        included_titles = set()
+        merged_docs = []
+        
+        # Adicionar documentos primários primeiro
+        for doc in primary_docs:
+            title = doc.get("title", "")
+            if title not in included_titles:
+                included_titles.add(title)
+                merged_docs.append(doc)
+        
+        # Adicionar documentos secundários que não são duplicatas
+        for doc in secondary_docs:
+            title = doc.get("title", "")
+            if title not in included_titles:
+                included_titles.add(title)
+                merged_docs.append(doc)
+        
+        return merged_docs
     
     def _expand_query(self, query: str) -> str:
         """
         Expande a consulta para melhorar a recuperação semântica
         Adiciona termos relacionados e sinônimos para aumentar a chance de encontrar documentos relevantes
         """
-        # Mapeamento de termos comuns para expansão
-        expansions = {
-            "perfil": ["perfis", "persona", "personas", "usuário", "usuários", "cliente", "clientes", "segmentação"],
-            "usuário": ["usuários", "cliente", "clientes", "perfil", "perfis", "persona", "personas"],
-            "cliente": ["clientes", "usuário", "usuários", "perfil", "perfis", "persona", "personas"],
-            "discovery": ["descoberta", "pesquisa", "investigação", "análise"],
-            "produto": ["produtos", "serviço", "serviços", "solução", "soluções", "aplicativo", "app"],
-            "stone": ["ton", "pagar.me", "pagarme", "pagamentos", "maquininha"],
-            "ton": ["stone", "pagar.me", "pagarme", "pagamentos", "maquininha"],
-            "pagar.me": ["pagarme", "stone", "ton", "pagamentos", "gateway"],
-            "pagarme": ["pagar.me", "stone", "ton", "pagamentos", "gateway"]
-        }
-        
-        # Termos específicos para perfis de usuários
-        if any(term in query.lower() for term in ["perfil", "usuário", "cliente", "persona"]):
-            query = f"{query} perfis personas usuários clientes segmentação comportamento características público-alvo target"
-        
-        # Expandir a consulta com termos relacionados
+        query_lower = query.lower()
         expanded_terms = []
-        for word in query.lower().split():
-            if word in expansions:
-                expanded_terms.extend(expansions[word])
+        
+        # Verificar se a consulta contém termos-chave e adicionar expansões relevantes
+        for topic, expansions in self.topic_expansions.items():
+            if topic in query_lower or any(term in query_lower for term in expansions[:3]):
+                # Adicionar todas as expansões para este tópico
+                expanded_terms.extend(expansions)
+        
+        # Expansão específica para consultas sobre perfis de usuários
+        if self._is_about_profiles(query):
+            expanded_terms.extend([
+                "quem são os usuários", "quais são os perfis", "tipos de usuários",
+                "segmentos de clientes", "características dos usuários",
+                "comportamento dos clientes", "necessidades dos usuários",
+                "personas identificadas", "público-alvo definido",
+                "segmentação de mercado", "perfil demográfico"
+            ])
+            
+            # Se a consulta menciona "conhecidos" ou "identificados", adicionar termos específicos
+            if "conhec" in query_lower or "identific" in query_lower:
+                expanded_terms.extend([
+                    "perfis já identificados", "usuários conhecidos",
+                    "personas existentes", "segmentos definidos",
+                    "clientes atuais", "base de usuários"
+                ])
         
         # Combinar a consulta original com os termos expandidos
         if expanded_terms:
-            expanded_query = f"{query} {' '.join(expanded_terms)}"
+            # Remover duplicatas mantendo a ordem
+            unique_expansions = []
+            seen = set()
+            for term in expanded_terms:
+                if term not in seen:
+                    seen.add(term)
+                    unique_expansions.append(term)
+            
+            expanded_query = f"{query} {' '.join(unique_expansions)}"
             # Limitar o tamanho da consulta expandida
-            if len(expanded_query) > 500:
-                expanded_query = expanded_query[:500]
+            if len(expanded_query) > 1000:
+                expanded_query = expanded_query[:1000]
             return expanded_query
         
         return query
@@ -198,37 +418,64 @@ class RAGIntegration:
     def _rerank_documents(self, documents: List[Dict], query: str) -> List[Dict]:
         """
         Reordena os documentos com base na relevância para a consulta
-        Implementa um algoritmo simples de reranking baseado em correspondência de termos
+        Implementa um algoritmo de reranking baseado em correspondência de termos e contexto semântico
         """
         if not documents:
             return []
         
         # Extrair termos importantes da consulta
         query_terms = set(query.lower().split())
+        query_lower = query.lower()
+        
+        # Verificar se a consulta é sobre perfis de usuários
+        is_profile_query = self._is_about_profiles(query)
         
         # Termos específicos para perfis de usuários
-        if any(term in query.lower() for term in ["perfil", "usuário", "cliente", "persona"]):
-            query_terms.update(["perfil", "perfis", "usuário", "usuários", "cliente", "clientes", "persona", "personas", "segmentação"])
+        profile_terms = [
+            "perfil", "perfis", "usuário", "usuários", "cliente", "clientes", 
+            "persona", "personas", "segmentação", "público-alvo", "target"
+        ]
         
         # Calcular pontuação para cada documento
         scored_docs = []
         for doc in documents:
+            score = 0
             content = doc.get("content", "").lower()
             title = doc.get("title", "").lower()
             
-            # Pontuação baseada na frequência dos termos da consulta no documento
-            score = 0
+            # 1. Correspondência de termos da consulta no título (peso alto)
             for term in query_terms:
-                # Termos no título têm peso maior
-                title_count = title.count(term) * 3
-                # Termos no conteúdo
-                content_count = content.count(term)
-                score += title_count + content_count
+                if term in title:
+                    score += 10
             
-            # Bônus para documentos com "perfil" ou "usuário" no título quando a consulta é sobre perfis
-            if any(term in query.lower() for term in ["perfil", "usuário", "cliente", "persona"]):
-                if any(term in title for term in ["perfil", "usuário", "cliente", "persona"]):
-                    score += 50
+            # 2. Correspondência de termos da consulta no conteúdo
+            for term in query_terms:
+                score += content.count(term) * 2
+            
+            # 3. Correspondência exata da consulta (peso muito alto)
+            if query_lower in content:
+                score += 50
+            
+            # 4. Pontuação adicional para documentos sobre perfis se a consulta for sobre perfis
+            if is_profile_query:
+                for term in profile_terms:
+                    if term in content:
+                        score += content.count(term)
+            
+            # 5. Pontuação baseada em contexto semântico
+            semantic_context = doc.get("semantic_context", "")
+            if semantic_context:
+                if is_profile_query and "perfil" in semantic_context:
+                    score += 30
+                elif any(topic in semantic_context for topic in query_terms):
+                    score += 20
+            
+            # 6. Pontuação baseada em palavras-chave
+            keywords = doc.get("keywords", [])
+            if keywords:
+                for keyword in keywords:
+                    if keyword.lower() in query_lower:
+                        score += 15
             
             # Adicionar documento com sua pontuação
             scored_docs.append((doc, score))
@@ -239,126 +486,178 @@ class RAGIntegration:
         # Retornar apenas os documentos, sem as pontuações
         return [doc for doc, _ in scored_docs]
     
-    def _build_rag_context(self, documents: List[Dict]) -> str:
-        """Constrói o contexto RAG a partir dos documentos recuperados"""
+    def _build_rag_context(self, documents: List[Dict], query: str) -> str:
+        """
+        Constrói o contexto RAG a partir dos documentos recuperados
+        
+        Args:
+            documents: Lista de documentos recuperados
+            query: Consulta original do usuário
+            
+        Returns:
+            String contendo o contexto RAG formatado
+        """
         if not documents:
-            return "Não foram encontrados documentos relevantes para esta consulta."
-            
-        context_parts = []
+            return "Não foram encontrados documentos relevantes para a consulta."
         
-        for i, doc in enumerate(documents):
-            title = doc.get("title", "Documento sem título")
+        # Limitar o número de documentos para evitar contexto muito grande
+        max_docs = min(10, len(documents))
+        selected_docs = documents[:max_docs]
+        
+        # Construir o contexto
+        context = f"Contexto baseado em {max_docs} documentos relevantes para a consulta: '{query}'\n\n"
+        
+        for i, doc in enumerate(selected_docs):
+            title = doc.get("title", f"Documento {i+1}")
             content = doc.get("content", "")
+            file_name = doc.get("file_name", "")
             
-            # Limitar o tamanho do conteúdo para evitar contextos muito grandes
-            if len(content) > 2000:
-                content = content[:2000] + "..."
-                
-            # Adicionar fonte numerada para facilitar citações
-            context_parts.append(f"--- Fonte {i+1}: {title} ---\n{content}\n")
+            # Limitar o tamanho do conteúdo para evitar contexto muito grande
+            max_content_length = 1000
+            if len(content) > max_content_length:
+                content = content[:max_content_length] + "..."
+            
+            # Adicionar informações do documento ao contexto
+            context += f"--- Documento {i+1}: {title} ---\n"
+            if file_name:
+                context += f"Fonte: {file_name}\n"
+            context += f"{content}\n\n"
         
-        return "\n".join(context_parts)
+        return context
     
     def _build_prompt(self, query: str, rag_context: str, guidelines: str, objective: str) -> str:
         """
-        Constrói o prompt completo seguindo o fluxo:
-        RAG > Diretrizes > Objetivo > Consulta
+        Constrói o prompt completo para a LLM
+        
+        Args:
+            query: Consulta do usuário
+            rag_context: Contexto RAG construído a partir dos documentos
+            guidelines: Diretrizes para a resposta
+            objective: Objetivo selecionado
+            
+        Returns:
+            String contendo o prompt completo
         """
-        return f"""
-# Contexto da Base de Conhecimento
+        # Construir o prompt
+        prompt = f"""Você é um assistente especializado em responder perguntas com base em documentos fornecidos.
+
+CONTEXTO:
 {rag_context}
 
-# Diretrizes Estratégicas
+DIRETRIZES:
 {guidelines}
 
-# Objetivo da Conversa
+OBJETIVO DA CONVERSA:
 {objective}
 
-# Consulta do Usuário
+PERGUNTA DO USUÁRIO:
 {query}
 
-Com base no contexto fornecido, nas diretrizes estratégicas e no objetivo da conversa, responda à consulta do usuário de forma clara, precisa e alinhada com o objetivo selecionado.
-
-IMPORTANTE:
-1. Inclua citações diretas das fontes quando relevante, indicando de qual fonte (número) a informação foi extraída.
-2. Se a informação solicitada estiver presente no contexto, SEMPRE cite-a diretamente.
-3. Utilize formatação rica para tornar a resposta mais legível:
-   - Use títulos (# Título, ## Subtítulo) para organizar seções
-   - Use listas (- item ou 1. item) para enumerar pontos
-   - Use **negrito** para destacar informações importantes
-   - Use > para criar callouts com informações destacadas
-   - Use tabelas quando apropriado para organizar dados
-4. Se não encontrar informações específicas sobre a consulta, indique claramente que não há dados suficientes.
-5. Organize a resposta em seções lógicas para facilitar a compreensão.
+Por favor, responda à pergunta do usuário com base apenas nas informações fornecidas no contexto acima. 
+Se as informações no contexto não forem suficientes para responder completamente à pergunta, indique claramente o que não pode ser respondido.
+Cite as fontes específicas (número do documento) ao fornecer informações.
+Formate sua resposta em markdown para melhor legibilidade.
 """
+        
+        return prompt
     
     def _generate_response(self, prompt: str) -> str:
-        """Gera resposta usando a LLM (OpenAI GPT-4o) com chamada direta à API"""
+        """
+        Gera uma resposta usando a OpenAI API
+        
+        Args:
+            prompt: Prompt completo para a LLM
+            
+        Returns:
+            String contendo a resposta gerada
+        """
         try:
-            # Usar chamada direta à API OpenAI via requests em vez do cliente
-            api_key = self.openai_api_key
-            if not api_key:
-                logger.error("API key da OpenAI não configurada")
-                return "Erro: API key da OpenAI não configurada. Por favor, configure a variável de ambiente OPENAI_API_KEY."
+            # Usar a API OpenAI v1.0.0+
+            from openai import OpenAI
             
-            # Endpoint da API OpenAI
-            url = "https://api.openai.com/v1/chat/completions"
+            # Inicializar cliente OpenAI
+            client = OpenAI(api_key=self.openai_api_key)
             
-            # Cabeçalhos da requisição
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
-            
-            # Corpo da requisição
-            data = {
-                "model": "gpt-4o",
-                "messages": [
-                    {"role": "system", "content": "Você é um assistente especializado em discovery de produto, que ajuda a responder consultas com base em documentos, diretrizes e objetivos específicos. Inclua citações diretas das fontes quando relevante. Use formatação rica (markdown) para tornar suas respostas mais legíveis e estruturadas."},
+            # Chamar a API
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "Você é um assistente especializado em responder perguntas com base em documentos fornecidos."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.7,
-                "max_tokens": 1500
-            }
+                temperature=0.3,
+                max_tokens=1000
+            )
             
-            # Fazer a requisição
-            logger.info("Enviando requisição para a API da OpenAI")
-            response = requests.post(url, headers=headers, json=data, timeout=60)
+            # Extrair e retornar a resposta
+            return response.choices[0].message.content
             
-            # Verificar se a requisição foi bem-sucedida
-            if response.status_code == 200:
-                # Extrair e retornar o texto da resposta
-                result = response.json()
-                return result["choices"][0]["message"]["content"]
-            else:
-                logger.error(f"Erro na API da OpenAI: {response.status_code} - {response.text}")
-                return f"Desculpe, ocorreu um erro ao processar sua consulta. Código: {response.status_code}. Por favor, tente novamente mais tarde."
-                
         except Exception as e:
-            logger.error(f"Erro ao gerar resposta com OpenAI: {str(e)}")
-            return f"Desculpe, ocorreu um erro ao processar sua consulta: {str(e)}. Por favor, tente novamente mais tarde."
+            logger.error(f"Erro ao gerar resposta: {str(e)}")
+            
+            # Fallback para resposta simples em caso de erro
+            return f"""
+# Resposta baseada nos documentos disponíveis
+
+Encontrei algumas informações relevantes para sua pergunta nos documentos disponíveis, mas ocorreu um erro ao gerar uma resposta completa.
+
+## Informações disponíveis
+
+Os documentos contêm informações sobre o tema consultado. Recomendo reformular sua pergunta ou tentar novamente mais tarde.
+
+## Erro técnico
+
+Ocorreu um erro ao processar sua consulta: {str(e)}
+"""
     
-    def _format_sources(self, documents: List[Dict]) -> List[Dict]:
-        """Formata as fontes para retorno na API"""
+    def _format_sources(self, documents: List[Dict]) -> List[Dict[str, str]]:
+        """
+        Formata as fontes para inclusão na resposta
+        
+        Args:
+            documents: Lista de documentos recuperados
+            
+        Returns:
+            Lista de dicionários com informações das fontes
+        """
         sources = []
         
-        for i, doc in enumerate(documents):
-            # Extrair metadados relevantes
-            metadata = doc.get("metadata", {})
-            file_path = metadata.get("file_path", "")
+        for doc in documents[:5]:  # Limitar a 5 fontes
+            title = doc.get("title", "")
+            file_name = doc.get("file_name", "")
             
-            # Determinar o nome do documento
-            doc_name = doc.get("title", f"Documento {i+1}")
-            
-            # Extrair um snippet relevante do conteúdo
-            content = doc.get("content", "")
-            snippet = content[:300] + "..." if len(content) > 300 else content
-            
-            sources.append({
-                "id": f"doc{i+1}",
-                "name": doc_name,
-                "snippet": snippet,
-                "url": file_path  # Usar o caminho do arquivo como URL
-            })
+            if title and file_name:
+                sources.append({
+                    "title": title,
+                    "file": file_name
+                })
         
         return sources
+
+# Função para gerar resposta (para uso direto)
+def generate_response(query: str, guidelines: str = None) -> Dict[str, Any]:
+    """
+    Gera uma resposta para a consulta do usuário com base nos documentos relevantes e diretrizes
+    
+    Args:
+        query: Consulta do usuário
+        guidelines: Diretrizes para a resposta (opcional)
+        
+    Returns:
+        Dicionário com a resposta e metadados
+    """
+    try:
+        # Inicializar RAG
+        rag = RAGIntegration()
+        
+        # Processar a consulta
+        result = rag.process_query(query)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Erro ao gerar resposta: {str(e)}")
+        return {
+            "response": f"Ocorreu um erro ao processar sua consulta: {str(e)}",
+            "sources": [],
+            "query": query
+        }
