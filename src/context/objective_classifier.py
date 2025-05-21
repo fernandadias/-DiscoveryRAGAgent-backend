@@ -11,7 +11,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 import openai
 from openai import OpenAI
-from src.utils.openai_safe import create_safe_openai_client
+from src.utils.openai_safe import create_minimal_openai_client
 
 # Configuração de logging
 logging.basicConfig(
@@ -55,8 +55,8 @@ class ObjectiveClassifier:
         if not self.api_key:
             logger.warning("API key não fornecida para o classificador de objetivos")
             
-        # Usar o método seguro para criar o cliente OpenAI
-        self.client = create_safe_openai_client(api_key=self.api_key)
+        # Usar o método mínimo para criar o cliente OpenAI, sem passar kwargs
+        self.client = create_minimal_openai_client(api_key=self.api_key)
         self.confidence_threshold = confidence_threshold
         self.examples = self._load_examples()
         self.example_embeddings = self._precompute_embeddings()
