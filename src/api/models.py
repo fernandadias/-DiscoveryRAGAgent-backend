@@ -25,6 +25,16 @@ class QueryResponse(BaseModel):
     response: str
     conversation_id: str
     sources: List[SourceModel]
+    objective_id: Optional[str] = None
+    auto_classified: Optional[bool] = False
+
+class ObjectiveClassificationResponse(BaseModel):
+    objective_id: str
+    objective_type: str
+    objective_description: str
+    confidence: float
+    scores: Dict[str, float]
+    auto_accept: bool
 
 class ConversationRequest(BaseModel):
     title: str
